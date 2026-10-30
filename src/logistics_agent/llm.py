@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Sequence
 import httpx
 
 # 复用阶段 1 的提示词组装逻辑，保证 CLI 与 Web 的提问方式一致。
-from reimburse_agent_mvp import build_messages
+from .reimburse_agent_mvp import build_messages
 
 # 上下文字符预算：超出后从最早的历史开始丢弃，避免把上下文撑爆。
 MAX_CONTEXT_CHARS = 3000

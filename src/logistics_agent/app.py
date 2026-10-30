@@ -59,29 +59,26 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-import agent
-import auth
-import db
-import llm
-from rag_service import (
-    BASE_DIR,
+from . import agent, auth, db, llm
+from .rag_service import (
     MAX_UPLOAD_BYTES,
     kb_service,
     seed_default_document,
 )
+from .utils.paths import PACKAGE_DIR, PROJECT_ROOT, KNOWLEDGE_DIR
 
 # 启动时从同目录的 .env 读取模型配置（密钥不写进代码）。
 # override=False：真实环境变量优先，方便容器/CI 覆盖。
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(BASE_DIR / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
 except ImportError:  # 没装 python-dotenv 时退化为只读系统环境变量
     print("[启动] 未安装 python-dotenv，跳过 .env 加载")
 
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATE_DIR = BASE_DIR / "templates"
-SEED_DOC = BASE_DIR / "discovery-report.md"
+STATIC_DIR = PACKAGE_DIR / "static"
+TEMPLATE_DIR = PACKAGE_DIR / "templates"
+SEED_DOC = KNOWLEDGE_DIR / "discovery-report.md"
 
 # Jinja2 模板：后台页面全部服务端渲染，不依赖前端框架
 TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -805,4 +802,4 @@ async def index(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("logistics_agent.app:app", host="127.0.0.1", port=8000, reload=False)

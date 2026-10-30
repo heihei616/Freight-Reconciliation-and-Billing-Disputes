@@ -29,9 +29,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
 
-import db
-import domain
-from rag_service import kb_service, to_citations
+from . import db
+from .core import domain
+from .rag_service import kb_service, to_citations
 
 MAX_TOOL_STEPS = 10         # 一次提问最多几轮工具调用，防止死循环
 WAYBILL_PATTERN = re.compile(r"^YD\d{10}$")
@@ -472,7 +472,7 @@ async def _tool_escalate_to_human(args: dict[str, Any], ctx: dict[str, Any]) -> 
 
 async def _tool_load_skill(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     # 延迟导入避免循环依赖（skills 会引用工具名常量）
-    import skills
+    from . import skills
 
     name = _as_str(args, "name", max_len=40)
     skill = skills.get_skill(name)

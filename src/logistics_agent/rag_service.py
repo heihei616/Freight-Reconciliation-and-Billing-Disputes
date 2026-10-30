@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 # 直接复用阶段 1 的核心模块，避免两套实现产生检索口径差异。
-from reimburse_agent_mvp import (
+from .reimburse_agent_mvp import (
     DEFAULT_BM25_WEIGHT,
     DEFAULT_TOP_K,
     LOCAL_VECTOR_DIM,
@@ -50,10 +50,12 @@ from reimburse_agent_mvp import (
     embed_texts,
     split_markdown,
 )
+from .utils.paths import PROJECT_ROOT, ensure_runtime_dirs
 
 BASE_DIR = Path(__file__).parent
-# 文档目录：放这里的所有受支持格式文件都会被纳入知识库。
-DOCS_DIR = BASE_DIR / "docs"
+# 只有制度语料参与索引；项目设计文档放在根目录 docs/，不会混入检索结果。
+DOCS_DIR = PROJECT_ROOT / "data" / "knowledge"
+ensure_runtime_dirs()
 # 索引缓存目录。
 # 注意：faiss 的 C++ 实现使用窄字符路径，在 Windows 上遇到中文路径会直接报
 # "could not open ... for writing"。本项目位于「物流」中文目录下，因此索引

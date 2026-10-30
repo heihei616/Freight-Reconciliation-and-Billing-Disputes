@@ -20,7 +20,7 @@ check_cases.py —— 评测用例自检
 
 运行
 ----
-    python evals/check_cases.py
+    python scripts/check_cases.py
 """
 
 from __future__ import annotations
@@ -30,14 +30,14 @@ import re
 import sys
 from pathlib import Path
 
-# 允许从项目根目录直接运行：把根目录放进 sys.path 才能 import 业务模块。
+# 未执行 pip install 时也能直接运行：优先使用仓库内的 src/。
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
-import domain          # noqa: E402  取真实单号做存在性校验
-import tools           # noqa: E402  取真实工具名做白名单校验
+from logistics_agent.core import domain  # noqa: E402  取真实单号做存在性校验
+from logistics_agent import tools        # noqa: E402  取真实工具名做白名单校验
 
-CASES_PATH = Path(__file__).with_name("eval_cases.json")
+CASES_PATH = ROOT / "tests" / "data" / "eval_cases.json"
 
 EXPECTED_FIELDS = ("question", "expected_tools", "expected_behavior", "category")
 EXPECTED_COUNTS = {"制度类": 10, "工具调用类": 10, "违规意图类": 5, "多轮上下文类": 5}

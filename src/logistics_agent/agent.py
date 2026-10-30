@@ -31,10 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-import db
-import llm
-import skills
-import tools
+from . import db, llm, skills, tools
 
 # 一次提问最多走几轮「决策 → 执行」。
 # 用户要求 5 轮：够跑完「查规则 → 查额度 → 要凭证 → 校验」这段探索，

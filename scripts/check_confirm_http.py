@@ -3,7 +3,7 @@ check_confirm_http.py —— 验证「建单前强制中断」在真实 HTTP 链
 
 为什么要单独写这个脚本
 ----------------------
-demo_trajectories.py 是在进程内直接调 agent.run()，它证明不了两件最关键的事：
+demo_agent.py 是在进程内直接调 agent.run()，它证明不了两件最关键的事：
   1. 中断发生时，SSE 连接是不是真的**挂着不断**（而不是偷偷结束再让前端重连）；
   2. 员工通过 POST /api/agent/confirm 点确认后，**同一条流**能否继续把建单结果推回来。
 
@@ -12,7 +12,7 @@ demo_trajectories.py 是在进程内直接调 agent.run()，它证明不了两�
 不用 requests/httpx，避免为了一个自检脚本再装依赖。
 
 前提：服务已启动在 127.0.0.1:8000
-运行：python check_confirm_http.py
+运行：python scripts/check_confirm_http.py
 """
 
 from __future__ import annotations

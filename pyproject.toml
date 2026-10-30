@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logistics-agent"
+version = "1.0.0"
+description = "物流费对账与计费争议智能体"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dynamic = ["dependencies"]
+
+[project.scripts]
+logistics-agent = "logistics_agent.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+logistics_agent = [
+  "static/*.html",
+  "static/*.css",
+  "templates/*.html",
+  "templates/admin/*.html",
+]

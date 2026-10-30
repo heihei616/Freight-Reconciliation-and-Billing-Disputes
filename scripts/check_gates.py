@@ -7,17 +7,19 @@ check_gates.py —— 闸门自检：不经过大模型，直接压工具层
 所以这里绕过 LLM，按最坏情况模拟模型的操作顺序（包括故意跳步、篡改金额），
 确认每一次越权都被服务端挡住。演示前跑一遍，答辩时也拿得出证据。
 
-运行：python check_gates.py
+运行：python scripts/check_gates.py
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 
-import db
-import tools
-from rag_service import kb_service
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from logistics_agent import db, tools
+from logistics_agent.rag_service import kb_service
 
 PASSED = 0
 FAILED = 0

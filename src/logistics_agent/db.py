@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -23,8 +24,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-# 数据库文件就放在本脚本同目录，随项目一起复制即可带走历史会话。
-DB_PATH = Path(__file__).parent / "chat.db"
+# 运行数据与源码分离；可用环境变量指向其他持久化位置。
+from .utils.paths import RUNTIME_DIR, ensure_runtime_dirs
+
+ensure_runtime_dirs()
+DB_PATH = Path(os.getenv("LOGISTICS_DB_PATH", str(RUNTIME_DIR / "chat.db")))
 
 _conn: sqlite3.Connection | None = None
 _lock = threading.Lock()

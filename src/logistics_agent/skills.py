@@ -51,7 +51,7 @@ _POLICY_WORDS = ("规则", "标准", "怎么算", "如何计算", "流程", "政
 
 def _mentions_carrier(text: str) -> bool:
     """问题里是否点了具体承运商的名字。"""
-    import domain          # 延迟导入：domain 不依赖 skills，不会成环
+    from .core import domain  # 延迟导入：domain 不依赖 skills，不会成环
     return any(card["carrier"] in text for card in domain.RATE_CARDS)
 
 SKILLS: dict[str, dict[str, Any]] = {

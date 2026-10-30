@@ -122,7 +122,7 @@ WHERE kind='confirm' AND tool_args LIKE '%"confirm"%';
 
 ## 四、三条典型轨迹
 
-复现：`python demo_trajectories.py`（`a`/`b`/`c` 可单跑）；HTTP 链路另跑 `python check_confirm_http.py`。
+复现：`python examples/demo_agent.py`（`a`/`b`/`c` 可单跑）；HTTP 链路另跑 `python scripts/check_confirm_http.py`。
 
 ### 示例 a：只查计费规则
 

@@ -1,0 +1,27 @@
+name: Bug 反馈
+description: 报告可复现的问题
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 期望行为与实际行为分别是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: 1. 启动服务\n2. 输入...\n3. 观察到...
+    validations:
+      required: true
+  - type: input
+    id: run_id
+    attributes:
+      label: 相关 run_id（如有）
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 请删除密钥、个人信息和业务敏感数据。

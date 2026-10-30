@@ -8,8 +8,8 @@ demo_trajectories.py —— 三个典型对话的轨迹回放
 结果摘要」打印出来，并校验「不该调的工具一次都没调」。
 
 运行：
-    python demo_trajectories.py            # 跑三条，真实模型
-    python demo_trajectories.py a          # 只跑示例 a
+    python examples/demo_agent.py            # 跑三条，真实模型
+    python examples/demo_agent.py a          # 只跑示例 a
 
 建单前的中断会被自动点「确认」——脚本扮演的就是员工那只手。
 真实前端里这一步是人点的，服务端行为完全一样。
@@ -25,13 +25,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
 # 这个脚本独立于 app.py 运行，必须自己把 .env 读进来，
 # 否则 llm 会因为找不到 LLM_API_KEY 退回离线模拟，轨迹就全成了假的。
-load_dotenv(Path(__file__).parent / ".env", override=False)
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
-import agent
-import db
-from rag_service import kb_service
+from logistics_agent import agent, db
+from logistics_agent.rag_service import kb_service
+from logistics_agent.utils.paths import PROJECT_ROOT
 
 # 每条用例：编号、意图说明、问题、期望 skill、禁止出现的工具
 CASES: list[dict[str, Any]] = [

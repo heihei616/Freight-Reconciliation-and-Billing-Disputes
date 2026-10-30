@@ -33,7 +33,7 @@ from typing import Any
 import jwt
 from fastapi import Request
 
-import db
+from . import db
 
 # ---------------------------------------------------------------------------
 # 常量

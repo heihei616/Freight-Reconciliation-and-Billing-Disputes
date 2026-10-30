@@ -1,15 +1,37 @@
-# 密钥与本地环境
+# 密钥与本地环境（.env.example 可以提交）
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 
-# 数据库与缓存
-chat.db
-chat.db-wal
-chat.db-shm
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 本地数据库、索引与运行数据
+data/runtime/
+*.db
+*.db-shm
+*.db-wal
 .rag_index/
 .web_index/
-__pycache__/
-*.pyc
+.logistics_rag_web_index/
 
-# 系统文件
+# 测试与覆盖率
+.coverage
+htmlcov/
+
+# 编辑器与系统文件
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
