@@ -1,0 +1,291 @@
+{% extends "base.html" %}
+{% block title %}制度知识库{% endblock %}
+{% block heading %}制度知识库{% endblock %}
+
+{% block content %}
+<div class="alert info" id="flash" hidden></div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">制度文档</div>
+    <div class="value" id="statDocs">{{ stats.document_count }}</div>
+    <div class="hint">md / txt / pdf 混合入库</div>
+  </div>
+  <div class="stat">
+    <div class="label">知识切片</div>
+    <div class="value" id="statChunks">{{ stats.chunk_count }}</div>
+    <div class="hint">每片约 500 字，含重叠</div>
+  </div>
+  <div class="stat">
+    <div class="label">索引状态</div>
+    <div class="value" id="statReady" style="font-size:18px">
+      {% if stats.ready %}<span class="tag ok">就绪</span>{% else %}<span class="tag danger">未就绪</span>{% endif %}
+    </div>
+    <div class="hint" id="statError">{{ stats.error or "可直接提问" }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>上传制度文档</h2>
+      <p>支持 {{ accepted }}，单个文件不超过 {{ max_size_mb }}MB；上传后自动重建索引</p>
+    </div>
+    <button class="btn ghost sm" type="button" id="reindexBtn">重建索引</button>
+  </div>
+  <div class="card-body">
+    <div class="upload-zone" id="dropZone">
+      <div class="upload-icon">⇪</div>
+      <div class="upload-title">把文件拖到这里，或 <label for="fileInput" class="link-label">点击选择文件</label></div>
+      <div class="upload-hint">PDF 只识别文字层：扫描件会提示「疑似扫描件」，需先做 OCR</div>
+      <input type="file" id="fileInput" accept="{{ accepted }}" hidden>
+    </div>
+
+    <div class="upload-picked" id="picked" hidden>
+      <span class="picked-name" id="pickedName"></span>
+      <button class="btn sm" type="button" id="uploadBtn">上传并重建索引</button>
+      <button class="btn ghost sm" type="button" id="clearBtn">取消</button>
+    </div>
+
+    <div class="progress-line" id="progress" hidden>
+      <span class="spinner"></span><span id="progressText">正在处理…</span>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>已入库文档</h2>
+      <p>切片数为该文件在向量索引中实际贡献的片段数量；删除会立即重建索引</p>
+    </div>
+  </div>
+  <div class="card-body" style="padding:0">
+    <table>
+      <thead>
+        <tr>
+          <th>文档</th>
+          <th style="width:92px">格式</th>
+          <th style="width:96px">大小</th>
+          <th style="width:92px">切片</th>
+          <th style="width:150px">更新时间</th>
+          <th style="width:92px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="docRows"></tbody>
+    </table>
+    <div class="empty" id="docEmpty" hidden>还没有文档，先上传一份制度文件吧</div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const rowsEl = $("docRows");
+  const emptyEl = $("docEmpty");
+
+  // ---------- 提示条 ----------
+  let flashTimer = null;
+  function flash(message, type = "ok") {
+    const el = $("flash");
+    el.className = "alert " + type;
+    el.textContent = message;
+    el.hidden = false;
+    el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    clearTimeout(flashTimer);
+    // 成功的提示自动消失；报错留着，让用户看清原因
+    if (type === "ok" || type === "info") {
+      flashTimer = setTimeout(() => { el.hidden = true; }, 6000);
+    }
+  }
+
+  function busy(on, text) {
+    $("progress").hidden = !on;
+    if (text) $("progressText").textContent = text;
+    $("uploadBtn").disabled = on;
+    $("reindexBtn").disabled = on;
+  }
+
+  // ---------- 表格渲染 ----------
+  function cell(text, className) {
+    const td = document.createElement("td");
+    if (className) td.className = className;
+    td.textContent = text;
+    return td;
+  }
+
+  function render(documents) {
+    rowsEl.replaceChildren();
+    emptyEl.hidden = documents.length > 0;
+
+    for (const doc of documents) {
+      const tr = document.createElement("tr");
+
+      const nameTd = document.createElement("td");
+      const name = document.createElement("div");
+      name.className = "doc-name";
+      name.textContent = doc.name;
+      nameTd.appendChild(name);
+      const meta = document.createElement("div");
+      meta.className = "doc-meta";
+      meta.textContent = doc.pages ? `共 ${doc.pages} 页` : "—";
+      if (!doc.indexed) {
+        const warn = document.createElement("span");
+        warn.className = "tag warn";
+        warn.style.marginLeft = "6px";
+        warn.textContent = "未入索引";
+        meta.appendChild(warn);
+      }
+      nameTd.appendChild(meta);
+      tr.appendChild(nameTd);
+
+      tr.appendChild(cell(doc.kind, "muted"));
+      tr.appendChild(cell(doc.size_text, "mono"));
+
+      const chunkTd = document.createElement("td");
+      const tag = document.createElement("span");
+      tag.className = "tag " + (doc.chunk_count > 0 ? "info" : "gray");
+      tag.textContent = doc.chunk_count;
+      chunkTd.appendChild(tag);
+      tr.appendChild(chunkTd);
+
+      tr.appendChild(cell(doc.updated_at, "muted"));
+
+      const opTd = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.className = "btn ghost sm";
+      btn.type = "button";
+      btn.textContent = "删除";
+      btn.addEventListener("click", () => removeDoc(doc.name));
+      opTd.appendChild(btn);
+      tr.appendChild(opTd);
+
+      rowsEl.appendChild(tr);
+    }
+  }
+
+  function renderStats(stats) {
+    $("statDocs").textContent = stats.document_count;
+    $("statChunks").textContent = stats.chunk_count;
+    $("statReady").innerHTML = stats.ready
+      ? '<span class="tag ok">就绪</span>'
+      : '<span class="tag danger">未就绪</span>';
+    $("statError").textContent = stats.error || "可直接提问";
+  }
+
+  // ---------- 与后端交互 ----------
+
+  /** 统一处理接口返回：非 2xx 时把信封里的中文消息抛出来。 */
+  async function call(url, options) {
+    const response = await fetch(url, options);
+    let payload = null;
+    try { payload = await response.json(); } catch (_) { /* 忽略非 JSON */ }
+    if (!response.ok) {
+      const message = (payload && payload.message) || `请求失败（HTTP ${response.status}）`;
+      throw new Error(message);
+    }
+    return payload || {};
+  }
+
+  async function refresh() {
+    const data = await call("/admin/api/documents");
+    render(data.documents || []);
+    renderStats(data.stats || {});
+  }
+
+  async function upload(file) {
+    const form = new FormData();
+    form.append("file", file);
+    busy(true, `正在解析并重建索引：${file.name}`);
+    try {
+      const data = await call("/admin/api/documents", { method: "POST", body: form });
+      flash(`${data.message}，当前共 ${data.stats.chunk_count} 个切片`, "ok");
+      clearPicked();
+      await refresh();
+    } catch (error) {
+      flash(error.message, "danger");
+    } finally {
+      busy(false);
+    }
+  }
+
+  async function removeDoc(name) {
+    if (!confirm(`确定删除《${name}》？删除后需要重新上传才能恢复。`)) return;
+    busy(true, `正在删除并重建索引：${name}`);
+    try {
+      const data = await call(`/admin/api/documents/${encodeURIComponent(name)}`, { method: "DELETE" });
+      flash(`${data.message}，当前共 ${data.stats.chunk_count} 个切片`, "ok");
+      await refresh();
+    } catch (error) {
+      flash(error.message, "danger");
+    } finally {
+      busy(false);
+    }
+  }
+
+  async function reindex() {
+    busy(true, "正在全量重建索引，文档较多时需要几十秒…");
+    try {
+      const data = await call("/admin/api/documents/reindex", { method: "POST" });
+      flash(data.message, "ok");
+      render(data.documents || []);
+      renderStats(data.stats || {});
+    } catch (error) {
+      flash(error.message, "danger");
+    } finally {
+      busy(false);
+    }
+  }
+
+  // ---------- 选择文件 ----------
+  let pendingFile = null;
+
+  function pick(file) {
+    if (!file) return;
+    pendingFile = file;
+    $("pickedName").textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} KB`;
+    $("picked").hidden = false;
+  }
+
+  function clearPicked() {
+    pendingFile = null;
+    $("fileInput").value = "";
+    $("picked").hidden = true;
+  }
+
+  $("fileInput").addEventListener("change", (event) => pick(event.target.files[0]));
+  $("clearBtn").addEventListener("click", clearPicked);
+  $("uploadBtn").addEventListener("click", () => { if (pendingFile) upload(pendingFile); });
+  $("reindexBtn").addEventListener("click", reindex);
+
+  // 拖拽上传
+  const zone = $("dropZone");
+  ["dragenter", "dragover"].forEach((type) => {
+    zone.addEventListener(type, (event) => {
+      event.preventDefault();
+      zone.classList.add("dragging");
+    });
+  });
+  ["dragleave", "drop"].forEach((type) => {
+    zone.addEventListener(type, (event) => {
+      event.preventDefault();
+      zone.classList.remove("dragging");
+    });
+  });
+  zone.addEventListener("drop", (event) => {
+    const file = event.dataTransfer.files[0];
+    pick(file);
+  });
+  zone.addEventListener("click", (event) => {
+    if (event.target.tagName !== "LABEL") $("fileInput").click();
+  });
+
+  // 首屏数据由服务端渲染，之后一律走接口，保证与索引状态一致
+  render({{ documents | tojson }});
+})();
+</script>
+{% endblock %}

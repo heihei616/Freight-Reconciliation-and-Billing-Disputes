@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}总览{% endblock %}
+{% block heading %}总览{% endblock %}
+
+{% block content %}
+<div class="stats">
+  <div class="stat">
+    <div class="label">制度文档</div>
+    <div class="value">{{ doc_count }}</div>
+    <div class="hint">已入库并可被检索</div>
+  </div>
+  <div class="stat">
+    <div class="label">知识切片</div>
+    <div class="value">{{ chunk_count }}</div>
+    <div class="hint">向量索引中的片段数</div>
+  </div>
+  <div class="stat">
+    <div class="label">今日问答</div>
+    <div class="value">{{ stats.today_messages }}</div>
+    <div class="hint">累计会话 {{ stats.total_sessions }} 个</div>
+  </div>
+  <div class="stat">
+    <div class="label">待处理疑点</div>
+    <div class="value">{{ stats.flagged + stats.ai_suspect }}</div>
+    <div class="hint">已标记 {{ stats.flagged }} · AI 预警 {{ stats.ai_suspect }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>系统状态</h2>
+      <p>模型与知识库的当前运行状态，配置来自 .env 与数据库</p>
+    </div>
+  </div>
+  <div class="card-body">
+    <table>
+      <tbody>
+        <tr>
+          <td style="width:180px" class="muted">对话模型</td>
+          <td><span class="mono">{{ model_name }}</span>
+            {% if mock_mode %}<span class="tag warn" style="margin-left:8px">离线模拟</span>
+            {% else %}<span class="tag ok" style="margin-left:8px">已接入</span>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="muted">向量模型</td>
+          <td><span class="mono">{{ embedding_model }}</span></td>
+        </tr>
+        <tr>
+          <td class="muted">知识库状态</td>
+          <td>{% if kb_ready %}<span class="tag ok">就绪</span>
+              {% else %}<span class="tag danger">未就绪</span>{% endif %}
+            {% if kb_error %}<span class="muted" style="margin-left:8px">{{ kb_error }}</span>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="muted">系统提示词</td>
+          <td>{{ prompt_len }} 字 ·
+            <a href="/admin/prompt">编辑</a>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>快捷操作</h2>
+      <p>常用入口</p>
+    </div>
+  </div>
+  <div class="card-body" style="display:flex;gap:10px;flex-wrap:wrap">
+    <a class="btn" href="/admin/knowledge">上传制度文档</a>
+    <a class="btn ghost" href="/admin/prompt">修改系统提示词</a>
+    <a class="btn ghost" href="/admin/audit">查看对话审计</a>
+    <a class="btn ghost" href="/">进入员工问答页</a>
+  </div>
+</div>
+{% endblock %}

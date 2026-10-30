@@ -1,0 +1,15 @@
+# 密钥与本地环境
+.env
+
+# 数据库与缓存
+chat.db
+chat.db-wal
+chat.db-shm
+.rag_index/
+.web_index/
+__pycache__/
+*.pyc
+
+# 系统文件
+.DS_Store
+Thumbs.db

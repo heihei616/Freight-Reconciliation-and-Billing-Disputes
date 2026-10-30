@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · 物流费对账助手</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="logo">物</div>
+    <h1>物流费对账与计费助手</h1>
+    <p class="sub">请登录后使用。员工可问答与发起对账，管理员可维护制度与审计。</p>
+
+    {% if error %}
+    <div class="alert danger">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/auth/login">
+      <input type="hidden" name="next" value="{{ next or '' }}">
+      <div class="field">
+        <label for="username">用户名</label>
+        <input type="text" id="username" name="username" value="{{ username or '' }}"
+               autocomplete="username" autofocus required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input type="password" id="password" name="password"
+               autocomplete="current-password" required>
+      </div>
+      <button class="btn" type="submit">登录</button>
+    </form>
+
+    <div class="demo-box">
+      <b>演示账号</b><br>
+      管理员：<b>admin</b> / admin123<br>
+      员工：<b>employee</b> / emp123
+    </div>
+  </div>
+</div>
+</body>
+</html>

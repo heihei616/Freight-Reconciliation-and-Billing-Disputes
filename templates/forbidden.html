@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>无访问权限 · 物流费对账助手</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card" style="text-align:center">
+    <div class="logo" style="margin:0 auto 16px">!</div>
+    <h1>无访问权限</h1>
+    <p class="sub">{{ message }}</p>
+    <p class="muted" style="font-size:12.5px">
+      管理后台仅限管理员使用。如需权限，请联系系统管理员。
+    </p>
+    <div style="display:flex;gap:8px;margin-top:20px">
+      <a class="btn ghost" href="/" style="flex:1;justify-content:center">返回问答页</a>
+      <form method="post" action="/auth/logout" style="margin:0;flex:1">
+        <button class="btn" type="submit" style="width:100%">切换账号</button>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>

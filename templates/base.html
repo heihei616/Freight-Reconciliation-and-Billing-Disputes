@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}管理后台{% endblock %} · 物流费对账助手</title>
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">物</div>
+      <div class="brand-text">
+        <strong>物流费对账助手</strong>
+        <span>管理后台</span>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-label">管理</div>
+      <a href="/admin" class="{% if active == 'dashboard' %}active{% endif %}">
+        <span class="ico">▤</span><span>总览</span>
+      </a>
+      <a href="/admin/knowledge" class="{% if active == 'knowledge' %}active{% endif %}">
+        <span class="ico">▢</span><span>制度知识库</span>
+      </a>
+      <a href="/admin/prompt" class="{% if active == 'prompt' %}active{% endif %}">
+        <span class="ico">✎</span><span>提示词模板</span>
+      </a>
+      <a href="/admin/audit" class="{% if active == 'audit' %}active{% endif %}">
+        <span class="ico">◎</span><span>对话审计</span>
+      </a>
+
+      <div class="nav-label">员工端</div>
+      <a href="/">
+        <span class="ico">↩</span><span>返回问答页</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-foot">
+      模型：{{ model_name }}<br>
+      {{ "离线模拟" if mock_mode else "已接入真实模型" }}
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1>{% block heading %}{% endblock %}</h1>
+      <div class="who">
+        <span class="avatar">{{ user.display_name[:1] }}</span>
+        <span>{{ user.display_name }}<span class="muted"> · {{ "管理员" if user.role == "admin" else "员工" }}</span></span>
+        <form method="post" action="/auth/logout" style="margin:0">
+          <button class="btn ghost sm" type="submit">退出</button>
+        </form>
+      </div>
+    </header>
+
+    <div class="content">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

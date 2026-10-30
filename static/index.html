@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>物流费制度问答 · 员工入口</title>
+<style>
+  /* ---------- 基础样式：浅色、克制、信息密度优先 ---------- */
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --line:#e3e6eb; --line-soft:#eef0f4;
+    --text:#1f2329; --text-2:#5f6672; --text-3:#8b939f;
+    --brand:#2563eb; --brand-soft:#eff4ff;
+    --ok:#12a150; --warn:#d97706; --err:#dc2626;
+    --radius:10px; --shadow:0 1px 3px rgba(16,24,40,.06),0 1px 2px rgba(16,24,40,.04);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{
+    font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+         "Microsoft YaHei",sans-serif;
+    color:var(--text);background:var(--bg);display:flex;overflow:hidden;
+  }
+  button{font-family:inherit;cursor:pointer;border:none;background:none;}
+  input,textarea{font-family:inherit;font-size:14px;color:inherit;}
+
+  /* ---------- 左侧栏：用户、会话、文档 ---------- */
+  .sidebar{
+    width:264px;flex:0 0 264px;background:var(--panel);
+    border-right:1px solid var(--line);display:flex;flex-direction:column;
+  }
+  .brand{padding:16px 16px 12px;border-bottom:1px solid var(--line-soft);}
+  .brand h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px;}
+  .brand p{margin:4px 0 0;font-size:12px;color:var(--text-3);}
+  .side-block{padding:12px 16px;border-bottom:1px solid var(--line-soft);}
+  .side-label{font-size:12px;color:var(--text-3);margin-bottom:6px;}
+  .side-block input[type=text]{
+    width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:8px;
+    outline:none;background:#fbfcfd;
+  }
+  .side-block input[type=text]:focus{border-color:var(--brand);background:#fff;}
+  .btn{
+    display:flex;align-items:center;justify-content:center;gap:6px;width:100%;
+    padding:8px 10px;border-radius:8px;font-size:13px;border:1px solid var(--line);
+    background:#fff;color:var(--text);transition:.15s;
+  }
+  .btn:hover{border-color:#c9cfd8;background:#fafbfc;}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff;}
+  .btn.primary:hover{background:#1d4ed8;}
+  .btn:disabled{opacity:.55;cursor:not-allowed;}
+
+  .scroll{overflow-y:auto;flex:1;}
+  .session{
+    padding:8px 10px;border-radius:8px;font-size:13px;color:var(--text-2);
+    cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    margin-bottom:2px;
+  }
+  .session:hover{background:#f6f7f9;}
+  .session.active{background:var(--brand-soft);color:var(--brand);font-weight:500;}
+  .doc{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);
+       padding:5px 0;border-bottom:1px dashed var(--line-soft);}
+  .doc:last-child{border-bottom:none;}
+  .doc .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .doc .del{color:var(--text-3);font-size:15px;line-height:1;padding:0 2px;}
+  .doc .del:hover{color:var(--err);}
+  .hint{font-size:11.5px;color:var(--text-3);line-height:1.6;margin-top:8px;}
+
+  /* ---------- 右侧主区 ---------- */
+  main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg);}
+  .topbar{
+    height:52px;flex:0 0 52px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line);
+  }
+  .topbar .title{font-size:13.5px;font-weight:500;color:var(--text);}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
+       background:var(--text-3);margin-right:6px;vertical-align:middle;}
+  .dot.ok{background:var(--ok);} .dot.bad{background:var(--err);}
+  .badge{font-size:12px;color:var(--text-2);}
+  .badge.mock{color:var(--warn);}
+
+  .messages{flex:1;overflow-y:auto;padding:22px 20px 8px;}
+  .wrap{max-width:820px;margin:0 auto;}
+  .empty{text-align:center;color:var(--text-3);padding-top:12vh;font-size:13px;}
+  .empty b{display:block;color:var(--text-2);font-size:15px;margin-bottom:8px;font-weight:600;}
+
+  .msg{display:flex;margin-bottom:18px;}
+  .msg.user{justify-content:flex-end;}
+  .avatar{
+    width:28px;height:28px;flex:0 0 28px;border-radius:8px;margin-right:10px;
+    display:flex;align-items:center;justify-content:center;font-size:12px;
+    background:var(--brand-soft);color:var(--brand);font-weight:600;
+  }
+  .bubble{
+    max-width:calc(100% - 40px);padding:10px 14px;border-radius:var(--radius);
+    background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow);
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .msg.user .bubble{background:var(--brand);border-color:var(--brand);color:#fff;}
+
+  /* 状态提示：正在检索制度… */
+  .status{
+    display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2);
+    background:#fbfcfd;border:1px dashed var(--line);border-radius:20px;padding:4px 11px;
+  }
+  .status .spin{
+    width:11px;height:11px;border:2px solid var(--line);border-top-color:var(--brand);
+    border-radius:50%;animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .caret{display:inline-block;width:2px;height:14px;background:var(--brand);
+         vertical-align:-2px;margin-left:1px;animation:blink 1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+
+  /* 引用卡片 */
+  .cites{margin-top:2px;border:1px solid var(--line);border-radius:var(--radius);
+         background:#fcfdfe;overflow:hidden;max-width:calc(100% - 40px);}
+  .cites-head{display:flex;align-items:center;justify-content:space-between;
+              padding:8px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;
+              background:#f7f9fb;border-bottom:1px solid var(--line-soft);}
+  .cites-head b{font-weight:600;color:var(--text);}
+  .cites-body{display:none;}
+  .cites.open .cites-body{display:block;}
+  .cite{padding:9px 12px;border-bottom:1px dashed var(--line-soft);}
+  .cite:last-child{border-bottom:none;}
+  .cite .top{display:flex;align-items:center;gap:7px;font-size:12.5px;}
+  .cite .idx{background:var(--brand-soft);color:var(--brand);font-size:11px;
+             padding:1px 6px;border-radius:5px;font-weight:600;}
+  .cite .file{font-weight:500;color:var(--text);}
+  .cite .sec{color:var(--text-3);font-size:11.5px;}
+  .cite .snip{color:var(--text-2);font-size:12.5px;margin-top:4px;line-height:1.6;}
+  .cite .score{color:var(--text-3);font-size:11px;margin-top:3px;}
+
+  /* 错误条 */
+  .errbar{display:flex;align-items:center;gap:10px;padding:9px 13px;border-radius:9px;
+          background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-size:13px;}
+  .errbar button{color:#b91c1c;text-decoration:underline;font-size:12.5px;}
+
+  /* ---------- 智能体：工具步骤条 ---------- */
+  .steps{display:flex;flex-direction:column;gap:3px;margin:0 0 9px;}
+  .steps:empty{display:none;}
+  .step{display:flex;gap:7px;font-size:12.5px;line-height:1.55;color:var(--text-2);
+        animation:fadein .18s ease;}
+  .step .ico{flex:0 0 14px;width:14px;text-align:center;color:var(--text-3);}
+  .step.run .ico{color:var(--brand);animation:pulse 1s ease-in-out infinite;}
+  .step.ok .ico{color:var(--ok);}
+  .step.bad .ico{color:var(--err);}
+  .step .t{color:var(--text);font-weight:500;}
+  .step .r{color:var(--text-3);}
+  .step.bad .r{color:var(--err);}
+  @keyframes fadein{from{opacity:0;transform:translateY(2px);}to{opacity:1;}}
+  @keyframes pulse{50%{opacity:.35;}}
+
+  /* ---------- 智能体：争议草稿卡片 ---------- */
+  .draft{margin-top:8px;border:1px solid #bfd4ff;border-radius:var(--radius);
+         background:#f7faff;padding:12px 14px;max-width:calc(100% - 40px);}
+  .draft h4{margin:0 0 7px;font-size:13px;font-weight:600;color:var(--text);}
+  .draft .row{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;
+              color:var(--text-2);margin-bottom:6px;}
+  .draft .row b{color:var(--text);font-weight:600;}
+  .draft .stmt{font-size:12.5px;color:var(--text-2);line-height:1.6;margin:2px 0 10px;}
+  .draft .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .draft .actions .btn{width:auto;padding:6px 13px;font-size:12.5px;}
+  .draft .tip{font-size:11.5px;color:var(--text-3);}
+  .draft.done{border-color:#bbf7d0;background:#f6fef9;}
+  .draft.done .tip{color:var(--ok);}
+
+  /* 待确认草稿栏：草稿只存在服务端，刷新后卡片要能重建，
+     否则员工再也找不到「确认提交」的入口，草稿就永远卡在 draft。 */
+  .pending{display:none;padding:12px 20px 6px;border-bottom:1px solid var(--line-soft);
+           background:#f8fafc;max-height:46vh;overflow-y:auto;}
+  .pending .pending-title{font-size:12px;color:var(--ink-3);margin-bottom:8px;}
+  .pending .draft{margin-top:0;margin-bottom:8px;max-width:100%;}
+
+  /* 输入区 */
+  .composer{padding:12px 20px 18px;background:var(--bg);}
+  .composer-inner{
+    max-width:820px;margin:0 auto;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:8px 8px 8px 14px;display:flex;align-items:flex-end;gap:8px;
+    box-shadow:var(--shadow);
+  }
+  .composer-inner:focus-within{border-color:var(--brand);}
+  textarea{
+    flex:1;border:none;outline:none;resize:none;background:transparent;
+    max-height:140px;line-height:1.6;padding:6px 0;
+  }
+  .send{
+    flex:0 0 auto;padding:8px 16px;border-radius:9px;background:var(--brand);
+    color:#fff;font-size:13px;font-weight:500;
+  }
+  .send:disabled{background:#c4cddb;}
+  .tip{max-width:820px;margin:7px auto 0;font-size:11.5px;color:var(--text-3);}
+  .toast{
+    position:fixed;left:50%;top:18px;transform:translateX(-50%);
+    background:#1f2329;color:#fff;font-size:13px;padding:8px 16px;border-radius:8px;
+    opacity:0;transition:.25s;pointer-events:none;z-index:99;
+  }
+  .toast.show{opacity:1;}
+</style>
+</head>
+<body>
+
+<!-- ============ 左侧栏 ============ -->
+<aside class="sidebar">
+  <div class="brand">
+    <h1>物流费制度问答</h1>
+    <p>员工入口 · 基于制度知识库</p>
+  </div>
+
+  <div class="side-block">
+    <div class="side-label">当前登录</div>
+    <div id="whoami" style="font-size:13px;color:var(--ink-2);padding:2px 0 6px;">加载中…</div>
+    <div style="display:flex;gap:6px;">
+      <a class="btn" href="/admin" id="adminLink" style="display:none;flex:1;text-align:center;text-decoration:none;">管理后台</a>
+      <form method="post" action="/auth/logout" style="margin:0;flex:1;">
+        <button class="btn" type="submit" style="width:100%;">退出</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="side-block" style="padding-bottom:10px;">
+    <button class="btn primary" id="newChatBtn">＋ 新会话</button>
+  </div>
+
+  <div class="side-block" style="flex:1;overflow-y:auto;padding-top:10px;">
+    <div class="side-label">历史会话</div>
+    <div id="sessionList"></div>
+  </div>
+
+  <div class="side-block" style="border-bottom:none;border-top:1px solid var(--line-soft);">
+    <div class="side-label">知识库</div>
+    <div id="docList"></div>
+    <div class="hint">制度文档由管理员在后台维护。</div>
+  </div>
+</aside>
+
+<!-- ============ 主区 ============ -->
+<main>
+  <div class="topbar">
+    <div class="title" id="chatTitle">新会话</div>
+    <div class="badge" id="healthBadge"><span class="dot"></span>连接中…</div>
+  </div>
+
+  <!-- 刷新后仍未提交的草稿：卡片从服务端重建，不依赖聊天记录 -->
+  <div class="pending" id="pendingDrafts"></div>
+
+  <div class="messages" id="messages">
+    <div class="wrap" id="msgWrap">
+      <div class="empty" id="emptyState">
+        <b>问点制度相关的问题吧</b>
+        例如：哪些情况需要转人工？<br>试点验收指标是什么？运费差异怎么复算？
+      </div>
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="composer-inner">
+      <textarea id="input" rows="1" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+      <button class="send" id="sendBtn">发送</button>
+    </div>
+    <div class="tip">回答仅依据知识库中的制度文档，并会在下方标注引用来源。</div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* =========================================================
+   前端逻辑
+   要点：
+   1. 原生 EventSource 只支持 GET，无法发 POST 请求体，
+      所以这里用 fetch + ReadableStream 手动解析 SSE 帧。
+   2. 打字机效果：模型增量先入队，再按帧匀速吐字，
+      避免真实模型一次吐一大段造成“唰”地出现。
+   3. 引用卡片在正文之前就渲染（后端先推 sources），
+      用户能第一时间看到依据来自哪份文档。
+   ========================================================= */
+
+const els = {
+  newChatBtn: document.getElementById('newChatBtn'),
+  sessionList: document.getElementById('sessionList'),
+  docList: document.getElementById('docList'),
+  chatTitle: document.getElementById('chatTitle'),
+  healthBadge: document.getElementById('healthBadge'),
+  messages: document.getElementById('messages'),
+  msgWrap: document.getElementById('msgWrap'),
+  emptyState: document.getElementById('emptyState'),
+  pendingDrafts: document.getElementById('pendingDrafts'),
+  input: document.getElementById('input'),
+  sendBtn: document.getElementById('sendBtn'),
+  toast: document.getElementById('toast'),
+};
+
+const state = {
+  sessionId: localStorage.getItem('kb_session') || null,
+  streaming: false,
+  abortController: null,
+};
+
+/* ---------------- 通用工具 ---------------- */
+
+function toast(text) {
+  els.toast.textContent = text;
+  els.toast.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => els.toast.classList.remove('show'), 2200);
+}
+
+function headers() {
+  // 登录态走 HttpOnly Cookie，浏览器会自动携带，前端不需要也不应该碰 token
+  return { 'Content-Type': 'application/json' };
+}
+
+// 统一处理 401：登录过期就送回登录页，并记住当前地址
+function handleUnauthorized(res) {
+  if (res.status === 401) {
+    location.href = '/login?next=' + encodeURIComponent(location.pathname);
+    return true;
+  }
+  return false;
+}
+
+function scrollIfNearBottom() {
+  const el = els.messages;
+  // 只有原本就在底部时才自动滚动，避免用户回看历史时被强行拉回
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+// 判断用纯文本渲染，防止制度文档里的内容被当成 HTML 执行
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+/* ---------------- 消息渲染 ---------------- */
+
+function clearEmpty() {
+  if (els.emptyState && els.emptyState.parentNode) els.emptyState.remove();
+}
+
+function addUserMessage(text) {
+  clearEmpty();
+  const row = document.createElement('div');
+  row.className = 'msg user';
+  row.innerHTML = `<div class="bubble">${esc(text)}</div>`;
+  els.msgWrap.appendChild(row);
+  scrollIfNearBottom();
+}
+
+/**
+ * 创建 AI 回答气泡，返回操作句柄。
+ * 结构：状态条 → 正文 → 引用卡片（正文下方，符合“底部展示来源”的要求）
+ */
+function addAssistantMessage() {
+  clearEmpty();
+  const row = document.createElement('div');
+  row.className = 'msg';
+  row.innerHTML = `
+    <div class="avatar">AI</div>
+    <div style="min-width:0;flex:1;">
+      <div class="bubble"><div class="steps"></div><span class="status"><span class="spin"></span><span class="statusText">正在理解问题…</span></span><span class="body"></span><span class="caret" style="display:none"></span></div>
+      <div class="cites" style="display:none;">
+        <div class="cites-head"><span><b>引用来源</b><span class="cnt"></span></span><span class="fold">收起 ▲</span></div>
+        <div class="cites-body"></div>
+      </div>
+    </div>`;
+  els.msgWrap.appendChild(row);
+  scrollIfNearBottom();
+
+  const bubble = row.querySelector('.bubble');
+  const status = row.querySelector('.status');
+  const statusText = row.querySelector('.statusText');
+  const body = row.querySelector('.body');
+  const caret = row.querySelector('.caret');
+  const cites = row.querySelector('.cites');
+  const stepsEl = row.querySelector('.steps');
+
+  // 工具步骤：调用先占位（执行中），结果回来再改成完成/失败。
+  // 结果事件只带工具名不带 id，所以按「同名先进先出」配对。
+  const pendingSteps = [];
+
+  function addStep(data) {
+    const el = document.createElement('div');
+    el.className = 'step run';
+    el.innerHTML = `<span class="ico">◍</span><span><span class="t">${esc(data.title || data.name)}</span> <span class="r">执行中…</span></span>`;
+    stepsEl.appendChild(el);
+    pendingSteps.push({ name: data.name, el });
+    scrollIfNearBottom();
+  }
+
+  function updateStep(data) {
+    const index = pendingSteps.findIndex(item => item.name === data.name);
+    const hit = index >= 0 ? pendingSteps.splice(index, 1)[0] : null;
+    const el = hit ? hit.el : null;
+    if (!el) return;
+    el.className = 'step ' + (data.ok ? 'ok' : 'bad');
+    el.innerHTML = `<span class="ico">${data.ok ? '✓' : '✕'}</span>` +
+      `<span><span class="t">${esc(data.title || data.name)}</span> ` +
+      `<span class="r">${esc(data.summary || '')}</span></span>`;
+    scrollIfNearBottom();
+  }
+
+  /** 草稿卡片：唯一的「人工确认」入口，模型调不到这个动作 */
+  function renderDraft(data) {
+    bubble.parentElement.appendChild(buildDraftCard(data));
+    scrollIfNearBottom();
+  }
+
+  // 打字机队列
+  const typer = { queue: '', timer: null };
+
+  function flush() {
+    if (!typer.queue) { typer.timer = null; return; }
+    // 队列积压越多，每帧吐得越多，保证不落后于模型输出速度
+    const n = Math.min(typer.queue.length, Math.max(2, Math.ceil(typer.queue.length / 6)));
+    body.textContent += typer.queue.slice(0, n);
+    typer.queue = typer.queue.slice(n);
+    scrollIfNearBottom();
+    typer.timer = requestAnimationFrame(flush);
+  }
+
+  return {
+    setStatus(text) {
+      statusText.textContent = text;
+      status.style.display = '';
+    },
+    hideStatus() { status.style.display = 'none'; },
+    startTyping() {
+      status.style.display = 'none';
+      caret.style.display = '';
+    },
+    append(text) {
+      typer.queue += text;
+      if (!typer.timer) typer.timer = requestAnimationFrame(flush);
+    },
+    /** 立即吐完剩余队列（收到 done 时调用，避免结尾卡顿） */
+    flushNow() {
+      if (typer.timer) { cancelAnimationFrame(typer.timer); typer.timer = null; }
+      body.textContent += typer.queue;
+      typer.queue = '';
+    },
+    setBody(text) { body.textContent = text; },
+    addStep,
+    updateStep,
+    renderDraft,
+    finish() {
+      this.flushNow();
+      caret.style.display = 'none';
+      status.style.display = 'none';
+    },
+    showError(message) {
+      this.flushNow();
+      caret.style.display = 'none';
+      status.style.display = 'none';
+      const bar = document.createElement('div');
+      bar.className = 'errbar';
+      bar.style.marginTop = body.textContent ? '10px' : '0';
+      bar.innerHTML = `<span>${esc(message)}</span><button>重新提问</button>`;
+      bar.querySelector('button').onclick = () => {
+        const q = els.input.value.trim();
+        if (q) send();
+      };
+      bubble.appendChild(bar);
+      scrollIfNearBottom();
+    },
+    renderCitations(list) {
+      if (!list || !list.length) return;
+      cites.style.display = '';
+      cites.classList.add('open');
+      row.querySelector('.cnt').textContent = `（${list.length}）`;
+      const bodyEl = cites.querySelector('.cites-body');
+      bodyEl.innerHTML = list.map(c => `
+        <div class="cite">
+          <div class="top">
+            <span class="idx">资料${c.index}</span>
+            <span class="file">${esc(c.file)}</span>
+            <span class="sec">· ${esc(c.section)}</span>
+          </div>
+          <div class="snip">${esc(c.snippet)}</div>
+          <div class="score">混合分 ${c.score} · BM25 ${c.bm25} · 向量 ${c.vector} · 原文偏移 ${c.offset}</div>
+        </div>`).join('');
+      cites.querySelector('.cites-head').onclick = () => {
+        cites.classList.toggle('open');
+        const open = cites.classList.contains('open');
+        cites.querySelector('.fold').textContent = open ? '收起 ▲' : '展开 ▼';
+      };
+      scrollIfNearBottom();
+    },
+  };
+}
+
+function addPlainAssistant(text, isError) {
+  const row = document.createElement('div');
+  row.className = 'msg';
+  row.innerHTML = `<div class="avatar">AI</div>
+    <div class="bubble" style="${isError ? 'border-color:#fecaca;background:#fef2f2;color:#b91c1c;' : ''}">${esc(text)}</div>`;
+  els.msgWrap.appendChild(row);
+  scrollIfNearBottom();
+}
+
+/**
+ * 造一张草稿卡片。
+ * 聊天流式返回时用一次，页面刷新后又用它从服务端重建——
+ * 两处共用同一份 DOM 结构，样式和按钮行为才不会走偏。
+ */
+function buildDraftCard(data) {
+  const submitted = data.status === 'submitted';
+  const card = document.createElement('div');
+  card.className = 'draft' + (submitted ? ' done' : '');
+  card.innerHTML = `
+    <h4>争议草稿 · ${submitted ? '已提交' : '待人工确认'}</h4>
+    <div class="row">
+      <span>账单 <b>${esc(data.bill_no || '-')}</b></span>
+      <span>类型 <b>${esc(data.dispute_type || '-')}</b></span>
+      <span>争议金额 <b>¥${Number(data.amount || 0).toFixed(2)}</b></span>
+    </div>
+    <div class="stmt">${esc(data.statement || '')}</div>
+    <div class="actions"></div>`;
+
+  const actions = card.querySelector('.actions');
+  if (submitted) {
+    actions.innerHTML =
+      `<span class="tip">已提交，争议单已进入结算复核队列（${esc(data.id || data.draft_id)}）</span>`;
+    return card;
+  }
+
+  actions.innerHTML = `
+    <button class="btn primary" type="button">确认提交</button>
+    <span class="tip">提交前请核对运单原件；AI 无提交权限</span>`;
+  const btn = actions.querySelector('button');
+  btn.onclick = () => submitDraft(data.id || data.draft_id, card, btn);
+  return card;
+}
+
+/** 拉取我名下未提交的草稿，重建卡片（刷新页面后仍能找到提交入口） */
+async function loadPendingDrafts() {
+  if (!els.pendingDrafts) return;
+  try {
+    const res = await fetch('/api/disputes');
+    if (handleUnauthorized(res)) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    const drafts = (data.drafts || []).filter(d => d.status === 'draft');
+    els.pendingDrafts.innerHTML = '';
+    if (!drafts.length) { els.pendingDrafts.style.display = 'none'; return; }
+
+    const title = document.createElement('div');
+    title.className = 'pending-title';
+    title.textContent = `有 ${drafts.length} 张争议草稿等你确认提交（AI 没有提交权限，必须你点）`;
+    els.pendingDrafts.appendChild(title);
+    drafts.forEach(d => els.pendingDrafts.appendChild(buildDraftCard(d)));
+    els.pendingDrafts.style.display = 'block';
+  } catch { /* 拉不到就不显示，不影响聊天 */ }
+}
+
+/**
+ * 人工确认提交。
+ * 这个请求由浏览器发出，模型在服务端的工具集里没有对应工具——
+ * 「AI 不能自己把争议单提交掉」是靠架构保证的，不是靠提示词。
+ */
+async function submitDraft(draftId, card, btn) {
+  if (!draftId) { toast('草稿编号缺失，请刷新后重试'); return; }
+  btn.disabled = true;
+  btn.textContent = '提交中…';
+  try {
+    const res = await fetch(`/api/disputes/${encodeURIComponent(draftId)}/submit`, {
+      method: 'POST',
+      headers: headers(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (handleUnauthorized(res)) return;
+      toast(data.message || `提交失败（${res.status}）`);
+      btn.disabled = false;
+      btn.textContent = '确认提交';
+      return;
+    }
+    card.classList.add('done');
+    card.querySelector('.actions').innerHTML =
+      `<span class="tip">已提交，争议单已进入结算复核队列（${esc(draftId)}）</span>`;
+    // 提交成功的卡从「待确认」栏撤掉，否则刷新前会一直挂在顶部
+    if (els.pendingDrafts && els.pendingDrafts.contains(card)) {
+      loadPendingDrafts();
+    }
+  } catch (e) {
+    toast(`网络异常：${e.message}`);
+    btn.disabled = false;
+    btn.textContent = '确认提交';
+  }
+}
+
+/* ---------------- SSE 解析与发送 ---------------- */
+
+/** 解析一个 SSE 帧文本块，返回 {event, data} */
+function parseFrame(raw) {
+  let event = 'message';
+  const dataLines = [];
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (!dataLines.length) return null;
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) };
+  } catch {
+    return null; // 非法 JSON 直接忽略，不让单帧异常打断整条流
+  }
+}
+
+async function send(retryText) {
+  if (state.streaming) return;
+
+  const question = (retryText ?? els.input.value).trim();
+  if (!question) { toast('请先输入问题'); return; }
+
+  state.streaming = true;
+  els.sendBtn.disabled = true;
+  els.sendBtn.textContent = '生成中';
+  els.input.value = '';
+  els.input.style.height = 'auto';
+
+  addUserMessage(question);
+  const ui = addAssistantMessage();
+
+  const controller = new AbortController();
+  state.abortController = controller;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        question,
+        top_k: 3,
+        bm25_weight: 0.5,
+      }),
+      signal: controller.signal,
+    });
+
+    // 建流前失败：后端返回标准 JSON 错误信封
+    if (!res.ok) {
+      if (handleUnauthorized(res)) return;
+      const err = await res.json().catch(() => ({ message: `请求失败（${res.status}）` }));
+      ui.showError(`${err.message || '请求失败'}（错误码 ${err.code ?? res.status}）`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE 以空行分隔帧；注意不同代理可能用 \r\n
+      let idx;
+      while ((idx = buffer.search(/\r?\n\r?\n/)) !== -1) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx).replace(/^\r?\n\r?\n/, '');
+        const frame = parseFrame(raw);
+        if (!frame) continue;
+
+        const { event, data } = frame;
+        if (event === 'meta') {
+          state.sessionId = data.session_id;
+          localStorage.setItem('kb_session', state.sessionId);
+          loadSessions();
+        } else if (event === 'status') {
+          ui.setStatus(data.text || '处理中…');
+          if (data.stage === 'generating') ui.startTyping();
+        } else if (event === 'state') {
+          // 能力包切换：让用户知道现在是「制度问答」还是「运费争议处理」
+          if (data.skill_title) ui.setStatus(`已进入「${data.skill_title}」模式…`);
+        } else if (event === 'tool_call') {
+          ui.addStep(data);
+        } else if (event === 'tool_result') {
+          ui.updateStep(data);
+        } else if (event === 'sources') {
+          ui.renderCitations(data.citations);
+        } else if (event === 'draft') {
+          ui.renderDraft(data);
+        } else if (event === 'delta') {
+          ui.startTyping();
+          ui.append(data.text || '');
+        } else if (event === 'done') {
+          ui.finish();
+        } else if (event === 'error') {
+          ui.showError(`${data.message}（错误码 ${data.code}）`);
+        }
+      }
+    }
+    ui.finish();
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      addPlainAssistant('已停止生成。', true);
+    } else {
+      addPlainAssistant(`网络异常：${e.message}`, true);
+    }
+  } finally {
+    state.streaming = false;
+    state.abortController = null;
+    els.sendBtn.disabled = false;
+    els.sendBtn.textContent = '发送';
+  }
+}
+
+/* ---------------- 会话列表与历史恢复 ---------------- */
+
+async function loadSessions() {
+  try {
+    const res = await fetch('/api/sessions');
+    if (handleUnauthorized(res)) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    els.sessionList.innerHTML = (data.sessions || []).map(s => `
+      <div class="session ${s.id === state.sessionId ? 'active' : ''}" data-id="${s.id}">
+        ${esc(s.title || '未命名会话')}
+      </div>`).join('') || `<div class="hint">还没有会话</div>`;
+
+    els.sessionList.querySelectorAll('.session').forEach(node => {
+      node.onclick = () => openSession(node.dataset.id);
+    });
+  } catch { /* 列表失败不影响主流程 */ }
+}
+
+async function openSession(sessionId) {
+  if (state.streaming) { toast('正在生成回答，请稍后再切换'); return; }
+  state.sessionId = sessionId;
+  localStorage.setItem('kb_session', sessionId);
+  els.msgWrap.innerHTML = '';
+  try {
+    const res = await fetch(`/api/sessions/${sessionId}/messages`);
+    if (handleUnauthorized(res)) return;
+    const data = await res.json();
+    if (!res.ok) { toast(data.message || '加载失败'); return; }
+    els.chatTitle.textContent = data.title || '会话';
+    (data.messages || []).forEach(m => {
+      if (m.role === 'user') {
+        addUserMessage(m.content);
+      } else {
+        const ui = addAssistantMessage();
+        ui.hideStatus();
+        ui.setBody(m.content);
+        ui.finish();
+        ui.renderCitations(m.citations || []);
+        if (m.status === 'error') ui.showError('该条回答生成失败');
+      }
+    });
+    loadSessions();
+  } catch (e) {
+    toast('加载历史失败：' + e.message);
+  }
+}
+
+function newChat() {
+  if (state.streaming) { toast('正在生成回答，请稍后再新建'); return; }
+  state.sessionId = null;
+  localStorage.removeItem('kb_session');
+  els.msgWrap.innerHTML = `<div class="empty" id="emptyState"><b>问点制度相关的问题吧</b>例如：哪些情况需要转人工？<br>试点验收指标是什么？运费差异怎么复算？</div>`;
+  els.chatTitle.textContent = '新会话';
+  loadSessions();
+}
+
+/* ---------------- 知识库文档（只读，维护在管理后台） ---------------- */
+
+function renderDocs(documents) {
+  els.docList.innerHTML = (documents || []).map(name => `
+    <div class="doc"><span class="name" title="${esc(name)}">${esc(name)}</span></div>
+  `).join('') || `<div class="hint">暂无文档</div>`;
+}
+
+/* ---------------- 当前登录身份 ---------------- */
+
+async function loadWhoami() {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (!res.ok) return;
+    const me = await res.json();
+    document.getElementById('whoami').textContent =
+      `${me.display_name}（${me.role === 'admin' ? '管理员' : '员工'}）`;
+    if (me.role === 'admin') {
+      document.getElementById('adminLink').style.display = 'block';
+    }
+  } catch { /* 忽略 */ }
+}
+
+/* ---------------- 健康检查 ---------------- */
+
+async function loadHealth() {
+  try {
+    const res = await fetch('/api/health');
+    const d = await res.json();
+    const kb = d.knowledge_base || {};
+    const bad = !kb.ready;
+    els.healthBadge.innerHTML = `<span class="dot ${bad ? 'bad' : 'ok'}"></span>` +
+      (bad ? '知识库未就绪'
+           : `${kb.chunk_count} 个切片 · ${kb.document_count} 份文档`) +
+      (d.llm && d.llm.mock ? ` · <span class="badge mock">离线模拟</span>` : '');
+    renderDocs(kb.documents);
+  } catch {
+    els.healthBadge.innerHTML = `<span class="dot bad"></span>服务未连接`;
+  }
+}
+
+/* ---------------- 事件绑定 ---------------- */
+
+els.newChatBtn.onclick = newChat;
+els.sendBtn.onclick = () => send();
+
+// 输入框：Enter 发送，Shift+Enter 换行；随内容自动增高
+els.input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+els.input.addEventListener('input', () => {
+  els.input.style.height = 'auto';
+  els.input.style.height = Math.min(els.input.scrollHeight, 140) + 'px';
+});
+
+// 首屏：身份 + 健康状态 + 会话列表；有上次会话就直接恢复
+(async function init() {
+  loadWhoami(); loadHealth(); loadSessions(); loadPendingDrafts();
+  if (state.sessionId) {
+    await openSession(state.sessionId);
+  }
+})();
+</script>
+</body>
+</html>
