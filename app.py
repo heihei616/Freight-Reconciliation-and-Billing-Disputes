@@ -109,6 +109,8 @@ ERRORS: dict[int, str] = {
     1015: "索引重建失败，请查看服务日志",
     1016: "草稿不存在或无权操作",
     1017: "该草稿已提交，不能重复提交",
+    1018: "确认请求已失效或无权确认",
+    1019: "草稿正文不能超过 1200 字",
     2001: "知识库尚未就绪，请稍后再试",
     2002: "尚未配置大模型，请联系管理员",
     3001: "检索失败，请重试",
@@ -285,6 +287,13 @@ class ChatRequest(BaseModel):
     mock: bool = Field(default=False, description="强制离线模拟，便于演示")
 
 
+class ConfirmRequest(BaseModel):
+    """员工对「建单前中断」的回应。"""
+    confirm_id: str = Field(description="confirm_open 事件里给的确认编号")
+    action: str = Field(default="confirm", description="confirm 或 cancel")
+    statement: str | None = Field(default=None, description="员工改过的草稿正文，可省略")
+
+
 # ---------------------------------------------------------------------------
 # SSE 工具
 # ---------------------------------------------------------------------------
@@ -405,6 +414,9 @@ async def chat(
             "citation_count": len(citations),
             "draft_id": draft_id,
             "tool_calls": agent_stats.get("tool_calls", 0),
+            "rounds": agent_stats.get("rounds", 0),
+            "run_id": agent_stats.get("run_id"),
+            "status": agent_stats.get("status"),
             "skill": agent_stats.get("skill"),
             "stage": agent_stats.get("stage"),
         })
@@ -418,6 +430,39 @@ async def chat(
             "X-Accel-Buffering": "no",   # 反向代理别缓冲，否则流式失效
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# 人工确认：智能体在 create_dispute_draft 之前挂起，等这个接口放行
+# ---------------------------------------------------------------------------
+
+@app.post("/api/agent/confirm")
+async def confirm_agent_action(payload: ConfirmRequest,
+                               user: dict[str, Any] = Depends(require_api_user)):
+    """
+    员工点了「确认建单」或「取消」。
+
+    注意：这个接口本身不建单。它只是把 agent.run 里挂起的 await 唤醒，
+    真正的建单动作仍然发生在那条 SSE 链路内部，所以工具轨迹、日志、
+    事件顺序都是连续的——不会出现「接口建了单但对话流不知道」的撕裂状态。
+    """
+    action = payload.action.strip().lower()
+    if action not in ("confirm", "cancel"):
+        raise ApiError(1018, "action 只能是 confirm 或 cancel", status=400)
+
+    statement = (payload.statement or "").strip() or None
+    # 与 tools.STATEMENT_MAX 保持一致；这里多一道是为了不让超长文本进内存
+    if statement and len(statement) > 1200:
+        raise ApiError(1019, status=400)
+
+    ok, reason = agent.submit_confirmation(payload.confirm_id, user["id"], action, statement)
+    if not ok:
+        raise ApiError(1018, reason, status=409)
+    return {
+        "confirm_id": payload.confirm_id,
+        "action": action,
+        "message": "已确认，正在建单" if action == "confirm" else "已取消，未建单",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +492,27 @@ async def submit_dispute(draft_id: str, user: dict[str, Any] = Depends(require_a
         raise ApiError(1017, reason, status=409)
     draft = await db.get_draft(draft_id)
     return {"message": "已提交，争议单已进入结算复核队列", "draft": draft}
+
+
+# ---------------------------------------------------------------------------
+# 智能体运行轨迹：阶段 5（效果分析）的数据出口
+# 现在先用它自证「每轮决策都记下来了」，后面做分析页直接读这两个接口。
+# ---------------------------------------------------------------------------
+
+@app.get("/api/agent/runs")
+async def list_agent_runs(limit: int = 20, user: dict[str, Any] = Depends(require_api_user)):
+    """我自己的执行记录。管理员可以另开一个视图看全员。"""
+    return {"runs": await db.list_runs(user["id"], limit=min(limit, 100))}
+
+
+@app.get("/api/agent/runs/{run_id}")
+async def get_agent_run(run_id: str, user: dict[str, Any] = Depends(require_api_user)):
+    """单次执行的逐轮明细：第几轮、调了什么、耗时多久、结果摘要。"""
+    runs = await db.list_runs(user["id"], limit=100)
+    hit = next((r for r in runs if r["id"] == run_id), None)
+    if hit is None:
+        raise ApiError(1004, "执行记录不存在", status=404)
+    return {"run": hit, "steps": await db.list_steps(run_id)}
 
 
 # ---------------------------------------------------------------------------

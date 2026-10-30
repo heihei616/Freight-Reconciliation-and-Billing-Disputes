@@ -116,12 +116,24 @@ def _data_of(call: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def _fetched_waybills(ctx: dict[str, Any]) -> set[str]:
-    """本会话里已经成功取过的运单号。"""
+    """
+    本会话里已经拿到「事实」的运单号。
+
+    两个来源都算：
+      1. 单独 get_waybill 取过的；
+      2. 账单明细里自带运单事实的（get_bill_lines 已把重量体积一并返回）。
+    闸门要拦的是「模型凭空编重量」，不是「必须按某个特定顺序调工具」。
+    """
     out: set[str] = set()
     for call in await _calls(ctx, "get_waybill"):
         data = _data_of(call)
         if data and data.get("waybill_no"):
             out.add(data["waybill_no"])
+    for call in await _calls(ctx, "get_bill_lines"):
+        data = _data_of(call)
+        for line in (data or {}).get("lines", []):
+            if line.get("waybill") and line.get("waybill_no"):
+                out.add(line["waybill_no"])
     return out
 
 
@@ -191,7 +203,27 @@ async def _tool_get_bill_lines(args: dict[str, Any], ctx: dict[str, Any]) -> dic
             "NOT_FOUND", f"系统中没有账单 {bill_no}",
             "可向用户确认账单号；当前演示环境可用账单：" + "、".join(domain.BILLS),
         )
-    return bill
+
+    # 每行顺带把运单事实带上。
+    # 真实对账系统导出账单时本来就带重量体积，这里跟着做同样的事：
+    # 否则「先读账单 → 才知道运单号 → 再逐张取运单」会白白多占一轮决策，
+    # 而 Harness 只给 5 轮，轮次是稀缺资源。
+    lines = []
+    for line in bill["lines"]:
+        waybill = domain.get_waybill(line["waybill_no"]) or {}
+        lines.append({
+            **line,
+            "waybill": {
+                "carrier": waybill.get("carrier"),
+                "lane": waybill.get("lane"),
+                "weight_kg": waybill.get("weight_kg"),
+                "volume_m3": waybill.get("volume_m3"),
+                "signed_at": waybill.get("signed_at"),
+                "goods": waybill.get("goods"),
+            } if waybill else None,
+        })
+
+    return {**bill, "lines": lines}
 
 
 async def _tool_get_rate_card(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
@@ -297,18 +329,26 @@ async def _tool_validate_invoice(args: dict[str, Any], ctx: dict[str, Any]) -> d
     }
 
 
+DISPUTE_TYPES = ["计费差异", "重复计费", "时效违约", "货损", "其他"]
+
+# 争议正文长度上限。
+# 500 字对「三处差异 + 依据」来说太紧，模型经常写超；
+# 而这段文本是给人看、并由人确认的，放宽到 1200 不会带来安全风险，
+# 只会减少「员工点完确认才被告知参数不合法」这种糟糕体验。
+STATEMENT_MAX = 1200
+
+
 async def _tool_create_dispute_draft(args: dict[str, Any],
                                      ctx: dict[str, Any]) -> dict[str, Any]:
     validation_id = _as_str(args, "validation_id", max_len=40,
                             hint="必须是 validate_invoice 返回的 validation_id")
     dispute_type = _as_str(args, "dispute_type", max_len=20)
-    allowed_types = ["计费差异", "重复计费", "时效违约", "货损", "其他"]
-    if dispute_type not in allowed_types:
+    if dispute_type not in DISPUTE_TYPES:
         raise ToolError("BAD_ARGS", f"争议类型不在允许范围：{dispute_type}",
-                        "可选：" + "、".join(allowed_types))
+                        "可选：" + "、".join(DISPUTE_TYPES))
     amount = _as_number(args, "amount")
-    statement = _as_str(args, "statement", max_len=500,
-                        hint="用一两句话说明争议事实与依据，不超过 500 字")
+    statement = _as_str(args, "statement", max_len=STATEMENT_MAX,
+                        hint=f"用几句话说明争议事实与依据，不超过 {STATEMENT_MAX} 字")
     evidence = _as_str_list(args, "evidence", required=False, max_items=10)
 
     validation = await db.get_validation(validation_id)
@@ -360,6 +400,64 @@ async def _tool_create_dispute_draft(args: dict[str, Any],
     }
 
 
+async def _tool_list_bills(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """按承运商 / 账期列出账单。用户只说「上个月的账」时用它，别反问单号。"""
+    carrier = _as_str(args, "carrier", required=False, max_len=30)
+    month = _as_str(args, "month", required=False, max_len=7)
+    bills = domain.list_bills(carrier, month)
+    if not bills:
+        raise ToolError("NOT_FOUND", "没有符合条件的账单",
+                        "请放宽账期或确认承运商名称，再不行就让用户提供账单号")
+    return {"bills": bills, "count": len(bills)}
+
+
+async def _tool_get_dispute_quota(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """查某承运商某个月的争议额度余量。纯读，无前置条件。"""
+    carrier = _as_str(args, "carrier", max_len=30, hint="承运商名称，如 华东速运")
+    month = _as_str(args, "month", max_len=7, hint="账期，形如 2026-09")
+    quota = domain.get_quota(carrier, month)
+    if quota is None:
+        raise ToolError("NOT_FOUND", f"{carrier} {month} 没有额度记录",
+                        "请确认承运商名称与账期；查不到额度不代表额度为零，应转人工确认")
+    return {
+        "quota": quota,
+        "note": "差额若超过剩余额度，需要先申请提额再建单，不要拆单规避",
+    }
+
+
+async def _tool_request_evidence(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
+    """
+    查某张账单的凭证齐备情况。
+
+    名字叫「要凭证」，但它本身不产生副作用——只是把「已经有什么、还缺什么」
+    摆出来，让模型据此向用户/承运商要材料，而不是凭空编造证据清单。
+    """
+    bill_no = _as_str(args, "bill_no", max_len=40)
+    items = _as_str_list(args, "items", required=False, max_items=6,
+                         hint="要核对的证据类别，可省略表示全查")
+    result = domain.check_evidence(bill_no, items or None)
+    if not result.get("found"):
+        raise ToolError("NOT_FOUND", f"系统中没有账单 {bill_no}", "请先确认账单号")
+    return result
+
+
+async def _tool_check_weight_ticket(args: dict[str, Any],
+                                    ctx: dict[str, Any]) -> dict[str, Any]:
+    """
+    判定一张称重单能否作为计费依据。
+
+    这是典型的「只校验」场景：用户只想知道这张单能不能用，
+    不需要查制度、不需要查额度、更不该建草稿。
+    """
+    ticket_no = _as_str(args, "ticket_no", max_len=30,
+                        hint="称重单号，形如 CD2026090201")
+    result = domain.check_weight_ticket(ticket_no)
+    if not result.get("found"):
+        raise ToolError("NOT_FOUND", f"系统中没有称重单 {ticket_no}",
+                        "请让用户提供正确的称重单号，不要猜测")
+    return result
+
+
 async def _tool_escalate_to_human(args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     reason = _as_str(args, "reason", max_len=40)
     summary = _as_str(args, "summary", max_len=300,
@@ -399,10 +497,14 @@ _HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]],
     "search_policy": _tool_search_policy,
     "get_waybill": _tool_get_waybill,
     "get_bill_lines": _tool_get_bill_lines,
+    "list_bills": _tool_list_bills,
     "get_rate_card": _tool_get_rate_card,
     "calc_expected_freight": _tool_calc_expected_freight,
     "validate_invoice": _tool_validate_invoice,
     "create_dispute_draft": _tool_create_dispute_draft,
+    "get_dispute_quota": _tool_get_dispute_quota,
+    "request_evidence": _tool_request_evidence,
+    "check_weight_ticket": _tool_check_weight_ticket,
     "escalate_to_human": _tool_escalate_to_human,
     "load_skill": _tool_load_skill,
 }
@@ -447,6 +549,21 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["bill_no"],
         },
     },
+    "list_bills": {
+        "name": "list_bills",
+        "description": (
+            "按承运商和账期列出账单（含账单号、总额、行数）。"
+            "用户说「核上个月某承运商的账」但没给账单号时，先用它查出账单，不要反问用户。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {"type": "string", "description": "承运商名称，如 华东速运"},
+                "month": {"type": "string", "description": "账期 YYYY-MM，如 2026-09"},
+            },
+            "required": [],
+        },
+    },
     "get_rate_card": {
         "name": "get_rate_card",
         "description": (
@@ -467,7 +584,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "name": "calc_expected_freight",
         "description": (
             "按合同价目计算应收运费（含体积重、抛比、燃油附加费、最低收费的完整推导）。"
-            "前置条件：这些运单必须已经用 get_waybill 取过事实。"
+            "前置条件：这些运单必须已经从 get_waybill 或账单明细里拿到事实数据。"
             "你不得自行乘算金额，所有数字都必须来自本工具的返回。"
         ),
         "parameters": {
@@ -513,12 +630,59 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                 "dispute_type": {"type": "string",
                                  "enum": ["计费差异", "重复计费", "时效违约", "货损", "其他"]},
                 "amount": {"type": "number", "description": "争议金额，必须等于校验差额"},
-                "statement": {"type": "string", "maxLength": 500,
-                              "description": "争议事实与依据，含条款出处"},
+                "statement": {"type": "string", "maxLength": STATEMENT_MAX,
+                              "description": "争议事实与依据，含条款出处，300 字左右即可"},
                 "evidence": {"type": "array", "items": {"type": "string"},
                              "description": "证据清单，如「运单 YD2026100101 磅单」"},
             },
             "required": ["validation_id", "dispute_type", "amount", "statement"],
+        },
+    },
+    "get_dispute_quota": {
+        "name": "get_dispute_quota",
+        "description": (
+            "查询某承运商某账期的争议额度（月度上限、已用、剩余）。"
+            "只有准备对整月账单发起批量争议时才需要；单纯查规则或校验单张单据时不要调用。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "carrier": {"type": "string", "description": "承运商名称，如 华东速运"},
+                "month": {"type": "string", "description": "账期 YYYY-MM，如 2026-09"},
+            },
+            "required": ["carrier", "month"],
+        },
+    },
+    "request_evidence": {
+        "name": "request_evidence",
+        "description": (
+            "查询某张账单的凭证齐备情况（称重单、签收回执、附加费依据各有哪些、缺哪些）。"
+            "核对整月账单前先调它，缺什么就向承运商要什么；不得自己编造证据清单。"
+            "它不会真的发消息，只是把缺口列出来。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bill_no": {"type": "string", "description": "账单号"},
+                "items": {"type": "array", "items": {"type": "string"},
+                          "description": "只查这几类证据，可省略表示全查"},
+            },
+            "required": ["bill_no"],
+        },
+    },
+    "check_weight_ticket": {
+        "name": "check_weight_ticket",
+        "description": (
+            "判定一张称重单能否作为计费依据（看签章、称重与提货时点、与运单重量偏差）。"
+            "用户只问「这张单能不能计入运费」时，用本工具给结论即可，"
+            "不需要查制度、查额度，更不需要建草稿。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ticket_no": {"type": "string", "description": "称重单号，形如 CD2026090201"},
+            },
+            "required": ["ticket_no"],
         },
     },
     "escalate_to_human": {
@@ -557,6 +721,34 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 def openai_tools(names: list[str]) -> list[dict[str, Any]]:
     """把工具名列表转成 OpenAI 兼容的 tools 参数结构。"""
     return [{"type": "function", "function": SCHEMAS[name]} for name in names if name in SCHEMAS]
+
+
+def precheck(name: str, args: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    执行前的纯参数校验，不碰数据库、不产生副作用。
+
+    为什么需要它：create_dispute_draft 会先触发「人工确认中断」。
+    如果参数本身就不合法（正文超长、类型不在枚举里），员工看完点了确认才被拒，
+    既浪费人的注意力，也白烧掉最后一轮决策。所以先在这里挡一道，
+    让模型在同一条链路上自己把参数改对，人工确认只留给真正合规的草稿。
+    """
+    if name != "create_dispute_draft":
+        return None
+
+    try:
+        _as_str(args, "validation_id", max_len=40)
+        dispute_type = _as_str(args, "dispute_type", max_len=20)
+        if dispute_type not in DISPUTE_TYPES:
+            raise ToolError("BAD_ARGS", f"争议类型不在允许范围：{dispute_type}",
+                            "可选：" + "、".join(DISPUTE_TYPES))
+        _as_number(args, "amount")
+        _as_str(args, "statement", max_len=STATEMENT_MAX,
+                hint=f"正文请压缩到 {STATEMENT_MAX} 字以内，只保留差异项与依据")
+        _as_str_list(args, "evidence", required=False, max_items=10)
+    except ToolError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message,
+                                       "next_hint": exc.next_hint}}
+    return None
 
 
 async def execute(name: str, args: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:

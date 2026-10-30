@@ -283,20 +283,38 @@ def embed_texts_api(texts: Sequence[str]) -> np.ndarray:
     ).rstrip("/")
     api_key = os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY", ""))
     model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-    batch_size = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "25")))
+    # 单批条数：不同供应商上限不一样（通义千问一度从 25 收到 20），
+    # 所以默认取保守值，并在服务端报「批量过大」时自动折半重试。
+    batch_size = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "10")))
 
-    items = list(texts)
-    vectors: list[list[float]] = []
-    for start in range(0, len(items), batch_size):
-        batch = items[start:start + batch_size]
+    def _embed_batch(batch: list[str]) -> list[list[float]]:
+        """一次请求；批量超限时二分递归，直到供应商接受为止。"""
         result = _post_json(
             f"{base_url}/embeddings",
             {"model": model, "input": batch},
             api_key=api_key,
         )
-        # OpenAI 兼容返回结构为 data[i].embedding；按 index 排序防止乱序。
         rows = sorted(result["data"], key=lambda d: d.get("index", 0))
-        vectors.extend(row["embedding"] for row in rows)
+        return [row["embedding"] for row in rows]
+
+    def _embed_adaptive(batch: list[str]) -> list[list[float]]:
+        try:
+            return _embed_batch(batch)
+        except RuntimeError as exc:
+            message = str(exc)
+            # 只在「参数非法/批量过大」这类可恢复错误上二分，
+            # 鉴权失败、地址写错之类的重试多少次都没用。
+            retryable = ("InvalidParameter" in message or "batch size" in message
+                         or "too large" in message)
+            if not retryable or len(batch) <= 1:
+                raise
+            mid = len(batch) // 2
+            return _embed_adaptive(batch[:mid]) + _embed_adaptive(batch[mid:])
+
+    items = list(texts)
+    vectors: list[list[float]] = []
+    for start in range(0, len(items), batch_size):
+        vectors.extend(_embed_adaptive(items[start:start + batch_size]))
 
     if len(vectors) != len(items):
         raise RuntimeError(

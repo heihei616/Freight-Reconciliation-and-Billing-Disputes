@@ -163,6 +163,14 @@
   .draft.done{border-color:#bbf7d0;background:#f6fef9;}
   .draft.done .tip{color:var(--ok);}
 
+  /* 建单前确认卡：比普通草稿卡更醒目，因为它拦住了唯一一个写操作 */
+  .draft.confirm{border-color:#f5c26b;background:#fffcf3;border-left:3px solid #e8a33d;}
+  .draft .issues{margin:0 0 8px;padding-left:20px;font-size:12px;color:var(--text-2);
+                 line-height:1.65;}
+  .draft .issues li{margin-bottom:2px;}
+  .draft.confirm .actions .btn[disabled]{opacity:.5;cursor:not-allowed;}
+  .draft .waiting{color:#b45309;}
+
   /* 待确认草稿栏：草稿只存在服务端，刷新后卡片要能重建，
      否则员工再也找不到「确认提交」的入口，草稿就永远卡在 draft。 */
   .pending{display:none;padding:12px 20px 6px;border-bottom:1px solid var(--line-soft);
@@ -407,6 +415,74 @@ function addAssistantMessage() {
     scrollIfNearBottom();
   }
 
+  /* ---------------- 建单前确认卡 ----------------
+     服务端在 create_dispute_draft 执行前挂起，把草稿正文流过来；
+     这里负责把闸门画出来——不点按钮，服务端的 await 永远不返回。 */
+  const confirmCards = {};
+
+  function renderConfirm(data) {
+    const issues = (data.issues || []).map(x =>
+      `<li>第${x.line_no}行 ${esc(x.explain || '')}（应 ${x.expected} / 收 ${x.charged} / 差 ${x.delta}）</li>`
+    ).join('');
+
+    const card = document.createElement('div');
+    card.className = 'draft confirm';
+    card.innerHTML = `
+      <h4>建单前确认 · 系统已暂停，等你核对</h4>
+      <div class="row">
+        <span>账单 <b>${esc(data.bill_no || '-')}</b></span>
+        <span>类型 <b>${esc(data.dispute_type || '-')}</b></span>
+        <span>争议金额 <b>¥${Number(data.amount || 0).toFixed(2)}</b></span>
+      </div>
+      ${issues ? `<ul class="issues">${issues}</ul>` : ''}
+      <div class="stmt confirm-stmt"></div>
+      <div class="actions">
+        <button class="btn primary" type="button" disabled>确认建单</button>
+        <button class="btn" type="button" disabled>取消</button>
+        <span class="tip">${data.timeout_sec || 180} 秒内不确认会自动取消</span>
+      </div>`;
+
+    const [okBtn, cancelBtn] = card.querySelectorAll('button');
+    okBtn.onclick = () => submitConfirm(data.confirm_id, 'confirm', card);
+    cancelBtn.onclick = () => submitConfirm(data.confirm_id, 'cancel', card);
+
+    confirmCards[data.confirm_id] = { card, okBtn, cancelBtn,
+      stmt: card.querySelector('.confirm-stmt') };
+
+    bubble.parentElement.appendChild(card);
+    scrollIfNearBottom();
+  }
+
+  /** 草稿正文按片流入，边流边显示，员工能提前开始读 */
+  function appendConfirm(confirmId, text) {
+    const entry = confirmCards[confirmId];
+    if (entry) {
+      entry.stmt.textContent += text;
+      scrollIfNearBottom();
+    }
+  }
+
+  /** 正文流完 → 按钮可用（这是「你可以点」的信号，不是数据到齐的信号） */
+  function readyConfirm(confirmId) {
+    const entry = confirmCards[confirmId];
+    if (!entry) return;
+    entry.okBtn.disabled = false;
+    entry.cancelBtn.disabled = false;
+    entry.card.querySelector('.tip').textContent =
+      '确认后才会真正建单；AI 没有绕过这一步的能力';
+  }
+
+  function closeConfirm(confirmId, decision, waitedMs) {
+    const entry = confirmCards[confirmId];
+    if (!entry) return;
+    const label = decision === 'confirm' ? '已确认，正在建单…'
+                : decision === 'cancel' ? '已取消，未建单'
+                : '等待超时，已自动取消';
+    entry.card.querySelector('.actions').innerHTML =
+      `<span class="tip${decision === 'confirm' ? '' : ' waiting'}">${esc(label)}` +
+      (waitedMs ? `（人工确认耗时 ${(waitedMs / 1000).toFixed(1)} 秒）` : '') + `</span>`;
+  }
+
   // 打字机队列
   const typer = { queue: '', timer: null };
 
@@ -444,6 +520,10 @@ function addAssistantMessage() {
     addStep,
     updateStep,
     renderDraft,
+    renderConfirm,
+    appendConfirm,
+    readyConfirm,
+    closeConfirm,
     finish() {
       this.flushNow();
       caret.style.display = 'none';
@@ -497,6 +577,36 @@ function addPlainAssistant(text, isError) {
     <div class="bubble" style="${isError ? 'border-color:#fecaca;background:#fef2f2;color:#b91c1c;' : ''}">${esc(text)}</div>`;
   els.msgWrap.appendChild(row);
   scrollIfNearBottom();
+}
+
+/**
+ * 回应「建单前中断」。
+ *
+ * 这个请求不会直接产生数据，它只是让服务端那条挂起的循环继续跑；
+ * 所以即使被重复点击也没关系——服务端会把第二次判成「已处理」。
+ */
+async function submitConfirm(confirmId, action, card) {
+  const buttons = card.querySelectorAll('button');
+  buttons.forEach(b => { b.disabled = true; });
+  try {
+    const res = await fetch('/api/agent/confirm', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ confirm_id: confirmId, action }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (handleUnauthorized(res)) return;
+      toast(data.message || `确认失败（${res.status}）`);
+      buttons.forEach(b => { b.disabled = false; });
+      return;
+    }
+    const tip = card.querySelector('.tip');
+    if (tip) tip.textContent = action === 'confirm' ? '已确认，等待系统建单…' : '已取消';
+  } catch (e) {
+    toast(`网络异常：${e.message}`);
+    buttons.forEach(b => { b.disabled = false; });
+  }
 }
 
 /**
@@ -683,6 +793,15 @@ async function send(retryText) {
           ui.renderCitations(data.citations);
         } else if (event === 'draft') {
           ui.renderDraft(data);
+        } else if (event === 'confirm_open') {
+          // 服务端已挂起，等员工点按钮；正文随后按片流过来
+          ui.renderConfirm(data);
+        } else if (event === 'confirm_delta') {
+          ui.appendConfirm(data.confirm_id, data.text || '');
+        } else if (event === 'confirm_ready') {
+          ui.readyConfirm(data.confirm_id);
+        } else if (event === 'confirm_closed') {
+          ui.closeConfirm(data.confirm_id, data.decision, data.waited_ms);
         } else if (event === 'delta') {
           ui.startTyping();
           ui.append(data.text || '');

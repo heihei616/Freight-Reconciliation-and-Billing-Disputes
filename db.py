@@ -130,6 +130,51 @@ CREATE TABLE IF NOT EXISTS drafts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_draft_user ON drafts(user_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- 智能体运行记录：一次提问 = 一个 run。
+-- 和 sessions 的区别：session 是「一段对话」，run 是「一次执行」，
+-- 同一会话里连续提问会产生多个 run，分析时要按 run 归组看轨迹。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL,
+  user_id       TEXT NOT NULL,
+  question      TEXT NOT NULL,
+  skill         TEXT,                    -- 本轮用的能力包
+  status        TEXT NOT NULL,           -- running/awaiting_confirm/done/error/capped
+  rounds        INTEGER NOT NULL DEFAULT 0,   -- 实际走了几轮「决策→执行」
+  tool_calls    INTEGER NOT NULL DEFAULT 0,   -- 工具调用总次数（一轮可并发多个）
+  confirm_count INTEGER NOT NULL DEFAULT 0,   -- 触发了几次人工确认中断
+  elapsed_ms    INTEGER,
+  started_at    TEXT NOT NULL,
+  finished_at   TEXT,
+  error         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_session ON agent_runs(session_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_run_user ON agent_runs(user_id, started_at);
+
+-- 每一轮决策的明细：工具名、参数、耗时、结果摘要。
+-- 阶段 5（效果分析）直接读这张表：哪个工具最慢、哪些参数总被拒、人工确认耗时多久。
+CREATE TABLE IF NOT EXISTS agent_steps (
+  id             TEXT PRIMARY KEY,
+  run_id         TEXT NOT NULL,
+  session_id     TEXT NOT NULL,
+  round          INTEGER NOT NULL,       -- 第几轮决策（从 1 开始）
+  kind           TEXT NOT NULL,          -- tool / confirm
+  tool_name      TEXT,
+  tool_args      TEXT,                   -- JSON
+  duration_ms    INTEGER,
+  ok             INTEGER NOT NULL DEFAULT 0,
+  error_code     TEXT,
+  result_summary TEXT,                   -- 一句话摘要，直接给人看
+  decision       TEXT,                   -- 模型这一轮说的话（截断到 200 字）
+  created_at     TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_step_run ON agent_steps(run_id, round);
+CREATE INDEX IF NOT EXISTS idx_step_tool ON agent_steps(tool_name, created_at);
 """
 
 # 为已有数据库补列：CREATE TABLE IF NOT EXISTS 不会给老表加字段，
@@ -795,4 +840,128 @@ async def list_drafts(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
 
 async def submit_draft(draft_id: str, user_id: str) -> tuple[bool, str]:
     return await asyncio.to_thread(_submit_draft_sync, draft_id, user_id)
+
+
+# ---------------------------------------------------------------------------
+# 智能体运行与每轮决策日志
+# ---------------------------------------------------------------------------
+
+def _create_run_sync(session_id: str, user_id: str, question: str,
+                     skill: str) -> dict[str, Any]:
+    run_id = _gen_id("r")
+    conn = _get_conn()
+    with _lock:
+        conn.execute(
+            "INSERT INTO agent_runs (id, session_id, user_id, question, skill, status,"
+            " started_at) VALUES (?, ?, ?, ?, ?, 'running', ?)",
+            (run_id, session_id, user_id, question, skill, _now()),
+        )
+        conn.commit()
+    return {"id": run_id, "session_id": session_id, "status": "running"}
+
+
+def _log_step_sync(run_id: str, session_id: str, round_no: int, kind: str,
+                   tool_name: str | None, tool_args: dict[str, Any] | None,
+                   duration_ms: int, ok: bool, error_code: str | None,
+                   result_summary: str, decision: str | None) -> str:
+    step_id = _gen_id("st")
+    conn = _get_conn()
+    with _lock:
+        conn.execute(
+            "INSERT INTO agent_steps (id, run_id, session_id, round, kind, tool_name,"
+            " tool_args, duration_ms, ok, error_code, result_summary, decision, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (step_id, run_id, session_id, round_no, kind, tool_name,
+             json.dumps(tool_args or {}, ensure_ascii=False), duration_ms,
+             1 if ok else 0, error_code,
+             result_summary[:500],
+             (decision or "")[:200] or None, _now()),
+        )
+        # 每写一步就更新 run 的累计值，避免结束时再扫一遍
+        conn.execute(
+            "UPDATE agent_runs SET rounds = MAX(rounds, ?),"
+            " tool_calls = tool_calls + ?, confirm_count = confirm_count + ?"
+            " WHERE id = ?",
+            (round_no, 1 if kind == "tool" else 0, 1 if kind == "confirm" else 0, run_id),
+        )
+        conn.commit()
+    return step_id
+
+
+def _finish_run_sync(run_id: str, status: str, elapsed_ms: int,
+                     error: str | None = None) -> None:
+    conn = _get_conn()
+    with _lock:
+        conn.execute(
+            "UPDATE agent_runs SET status = ?, elapsed_ms = ?, finished_at = ?, error = ?"
+            " WHERE id = ?",
+            (status, elapsed_ms, _now(), error, run_id),
+        )
+        conn.commit()
+
+
+def _set_run_status_sync(run_id: str, status: str) -> None:
+    conn = _get_conn()
+    with _lock:
+        conn.execute("UPDATE agent_runs SET status = ? WHERE id = ?", (status, run_id))
+        conn.commit()
+
+
+def _list_runs_sync(user_id: str | None, limit: int = 20) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    if user_id:
+        rows = conn.execute(
+            "SELECT * FROM agent_runs WHERE user_id = ? ORDER BY rowid DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM agent_runs ORDER BY rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _list_steps_sync(run_id: str) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM agent_steps WHERE run_id = ? ORDER BY round, rowid", (run_id,)
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["tool_args"] = _loads(item.get("tool_args")) or {}
+        out.append(item)
+    return out
+
+
+async def create_run(session_id: str, user_id: str, question: str,
+                     skill: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_create_run_sync, session_id, user_id, question, skill)
+
+
+async def log_step(run_id: str, session_id: str, round_no: int, kind: str,
+                   tool_name: str | None = None, tool_args: dict[str, Any] | None = None,
+                   duration_ms: int = 0, ok: bool = True, error_code: str | None = None,
+                   result_summary: str = "", decision: str | None = None) -> str:
+    return await asyncio.to_thread(
+        _log_step_sync, run_id, session_id, round_no, kind, tool_name, tool_args,
+        duration_ms, ok, error_code, result_summary, decision,
+    )
+
+
+async def finish_run(run_id: str, status: str, elapsed_ms: int,
+                     error: str | None = None) -> None:
+    await asyncio.to_thread(_finish_run_sync, run_id, status, elapsed_ms, error)
+
+
+async def set_run_status(run_id: str, status: str) -> None:
+    await asyncio.to_thread(_set_run_status_sync, run_id, status)
+
+
+async def list_runs(user_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_list_runs_sync, user_id, limit)
+
+
+async def list_steps(run_id: str) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_list_steps_sync, run_id)
 
