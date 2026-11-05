@@ -39,13 +39,26 @@ fmt:  ## 自动格式化
 	-$(PY) -m ruff format src tests examples scripts
 	-$(PY) -m ruff check --fix src tests examples scripts
 
-check:  ## 一次性跑完所有检查：规范 → 文档 → 用例 → 测试
+check:  ## 一次性跑完所有检查：规范 → 文档 → 用例 → 闸门 → 测试
 	$(PY) scripts/check_repo.py
 	$(PY) scripts/check_docs.py
 	$(PY) scripts/check_cases.py
+	$(PY) scripts/check_gates.py
 	$(PY) -m unittest discover -s tests
 	$(PY) -m compileall -q src tests examples scripts
 	@echo "全部检查通过"
+
+preflight:  ## 上线前预检（生产标准，非 0 退出即阻断发布）
+	$(PY) scripts/preflight.py --env production
+# 注意：这一项会因「仍在使用演示口令」而失败，直到执行 make passwd。
+# 这是有意的——它正是发布门禁要拦的东西。
+
+passwd:  ## 列出账号与口令状态（谁还在用演示口令）
+	$(PY) scripts/set_password.py --list
+
+passwd-set:  ## 改密：make passwd-set USER=admin
+	@test -n "$(USER)" || (echo "用法：make passwd-set USER=<账号>"; exit 2)
+	$(PY) scripts/set_password.py --user $(USER)
 
 docs:  ## 只校验文档与代码的一致性
 	$(PY) scripts/check_docs.py

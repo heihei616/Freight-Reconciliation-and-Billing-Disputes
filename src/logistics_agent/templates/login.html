@@ -32,11 +32,13 @@
       <button class="btn" type="submit">登录</button>
     </form>
 
+    {% if demo_accounts %}
     <div class="demo-box">
       <b>演示账号</b><br>
-      管理员：<b>admin</b> / admin123<br>
-      员工：<b>employee</b> / emp123
+      {% for account in demo_accounts %}{{ account.role }}：<b>{{ account.username }}</b> / {{ account.password }}{% if not loop.last %}<br>{% endif %}
+      {% endfor %}
     </div>
+    {% endif %}
   </div>
 </div>
 </body>

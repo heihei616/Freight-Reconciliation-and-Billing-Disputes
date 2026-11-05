@@ -1,0 +1,80 @@
+# ============================================================
+# 单机部署编排
+#
+# 首次使用：
+#   cp .env.example .env      # 填模型密钥；生产还要设 JWT_SECRET 与 COOKIE_SECURE=1
+#   docker compose up -d --build
+#   docker compose ps         # 等 health 变成 healthy
+#
+# 生产环境：
+#   APP_ENV=production docker compose up -d --build
+#   此时启动校验会强制要求模型密钥、JWT_SECRET、Secure Cookie，
+#   任一缺失直接拒绝启动——这是有意的，不要用 development 绕过。
+# ============================================================
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: logistics-agent:1.4.0
+    container_name: logistics-agent
+
+    env_file:
+      - .env
+
+    environment:
+      # 默认 development 便于本地验证；生产显式传 APP_ENV=production
+      APP_ENV: ${APP_ENV:-development}
+      # 生产首次启动：在 .env 里设 ADMIN_INITIAL_PASSWORD（≥12 位），
+      # 用它登录 admin 后立即改密并从 .env 删掉；库非空时该值被忽略。
+      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8000"
+      # 容器内固定路径，宿主机通过命名卷持久化；不要指向 /app/src
+      LOGISTICS_DB_PATH: /app/data/runtime/chat.db
+      RAG_INDEX_DIR: /app/data/index
+      # 反向代理的地址必须显式声明，否则 uvicorn 不信任 X-Forwarded-For：
+      # 所有用户会被记成同一个容器网关 IP，登录限流变成「一人手误锁全公司」。
+      # 宿主机 nginx → 容器时，来源通常是 Docker 网桥地址，而不是 127.0.0.1。
+      # 按 `docker network inspect` 的实际网关填写；**不要写 * **。
+      # FORWARDED_ALLOW_IPS: 172.17.0.1
+
+    ports:
+      # 默认只绑回环：前面应有反向代理负责 TLS 与鉴权边界。
+      # 需要局域网直连时改 APP_PORT 与绑定地址，并确认 COOKIE_SECURE 配置正确。
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+
+    volumes:
+      # 数据库、索引、知识库文档、备份都在这个卷里。
+      # 首次创建空卷时 Docker 会把镜像内的 data/knowledge 复制进来。
+      - appdata:/app/data
+
+    restart: unless-stopped
+    # uvicorn 收到 SIGTERM 后先停止接收新请求，再等在途 SSE 收尾；
+    # 30 秒足够一次模型回答结束，超时才会强杀。
+    stop_grace_period: 30s
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen(
+              'http://127.0.0.1:8000/healthz', timeout=3).getcode() == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    # 限制日志体积：默认 json-file 会无限增长，长期运行能把磁盘写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  appdata:
+    name: logistics-agent-data

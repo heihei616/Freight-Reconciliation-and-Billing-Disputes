@@ -45,12 +45,13 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import (
     FileResponse,
+    PlainTextResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -61,13 +62,21 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import agent, auth, db, llm, ratelimit, skills
+from . import __version__, agent, auth, db, llm, ratelimit, skills
+from .metrics import metrics
 from .rag_service import (
     MAX_UPLOAD_BYTES,
     kb_service,
     seed_default_document,
 )
 from .utils.paths import PACKAGE_DIR, PROJECT_ROOT, KNOWLEDGE_DIR
+from .utils.config import (
+    PRODUCTION,
+    current_env,
+    format_report,
+    load_config,
+    validate_env,
+)
 
 # 启动时从同目录的 .env 读取模型配置（密钥不写进代码）。
 # override=False：真实环境变量优先，方便容器/CI 覆盖。
@@ -77,6 +86,10 @@ try:
     load_dotenv(PROJECT_ROOT / ".env", override=False)
 except ImportError:  # 没装 python-dotenv 时退化为只读系统环境变量
     print("[启动] 未安装 python-dotenv，跳过 .env 加载")
+
+# 配置在导入时读一次：lifespan 里的校验和 uvicorn 的启动参数用的是同一份，
+# 避免「校验看 A、实际跑 B」。
+APP_CONFIG = load_config()
 
 STATIC_DIR = PACKAGE_DIR / "static"
 TEMPLATE_DIR = PACKAGE_DIR / "templates"
@@ -116,6 +129,7 @@ ERRORS: dict[int, str] = {
     1023: "提示词版本不存在，可能已被清理",
     1024: "保留天数需在 1~3650 之间",
     1025: "审计记录不存在",
+    1026: "跨站请求被拒绝",
     2001: "知识库尚未就绪，请稍后再试",
     2002: "尚未配置大模型，请联系管理员",
     3001: "检索失败，请重试",
@@ -172,11 +186,21 @@ async def _retention_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时：建表 → 演示账号 → 默认提示词 → 准备文档 → 加载索引 → 清理旧日志。"""
+    """启动时：配置校验 → 建表 → 演示账号 → 默认提示词 → 准备文档 → 加载索引 → 清理旧日志。"""
+    # 第一步就把坏配置挡在门外。让服务带着 `LLM_TIMEOUT=90s` 跑起来，
+    # 表现会是「页面能开、一问就 500」，排查成本远高于启动失败。
+    report = validate_env(APP_CONFIG)
+    print(format_report(report))
+    if not report.ok:
+        raise RuntimeError(
+            f"配置校验未通过（{len(report.errors)} 项错误），服务拒绝启动。"
+            "请按上面的提示修正 .env（或环境变量）后重试。")
+
     await db.init_db()
     # 限流参数从环境变量读取，默认开启；RATE_LIMIT_ENABLED=0 仅供本地调试
     ratelimit.limiter.apply_config(ratelimit.RateLimitConfig.from_env())
-    created = await auth.ensure_demo_users()
+    ratelimit.login_guard.config = ratelimit.LoginGuardConfig.from_env()
+    created = await auth.ensure_initial_accounts()
     await auth.ensure_default_prompt()
     seed_default_document(SEED_DOC)     # 首次启动把阶段 1 的文档放进 docs/
     await kb_service.ensure_ready()
@@ -185,11 +209,18 @@ async def lifespan(app: FastAPI):
           f"切片={stats['chunk_count']} 模型={llm.provider_info()['model']} "
           f"mock={llm.provider_info()['mock']}")
     if created:
-        print(f"[启动] 已创建演示账号：{'、'.join(created)}")
+        print(f"[启动] 已创建演示账号：{'、'.join(created)}"
+              "（口令随代码发版，仅限本地；生产环境不会播种）")
     # 演示口令随代码发版，一旦暴露到内网就等于后台全开。启动时明确告警，
-    # 比写在文档里等运维自己想起来更可靠。
+    # 比写在文档里等运维自己想起来更可靠；生产环境直接拒绝启动。
     insecure = await auth.insecure_demo_accounts()
     if insecure:
+        if current_env() == PRODUCTION:
+            raise RuntimeError(
+                "生产环境仍在使用演示口令的账号：" + "、".join(insecure)
+                + "。服务已拒绝启动。请先停服，在宿主机执行 "
+                  "`python scripts/set_password.py --user <账号>` 改密"
+                  "（脚本直接写库，不需要服务在跑），或删除这些账号后重启。")
         print(f"[安全] 以下账号仍在使用演示口令，共享环境部署前必须修改：{'、'.join(insecure)}")
 
     retention_task = asyncio.create_task(_retention_worker())
@@ -276,10 +307,101 @@ async def handle_unexpected(request: Request, exc: Exception):
     )
 
 
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+# 安全响应头只做浏览器侧的最小防护，不改变业务行为。
+# CSP 允许 inline，是因为页面是服务端渲染 + 内联脚本，没有前端构建链；
+# 真正的注入防线是模板里的 esc()，CSP 负责挡住外域脚本、iframe 嵌套与 base 篡改。
+_BASE_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    ),
+}
+
+
+def _is_https(request: Request) -> bool:
+    """反向代理终止 TLS 时，内部看到的是 http，需要看 X-Forwarded-Proto。"""
+    if request.url.scheme == "https":
+        return True
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    return forwarded == "https"
+
+
+def _origin_allowed(request: Request, value: str) -> bool:
+    """
+    判断 Origin / Referer 是否属于本站。
+
+    只比 netloc（host:port），不比 scheme：代理终止 TLS 时，
+    浏览器发来的是 https、应用看到的是 http，比 scheme 会把正常请求全部误杀。
+    """
+    parts = urlsplit(value)
+    if not parts.netloc:
+        return False
+    allowed = {(request.headers.get("host") or "").lower()}
+    for item in os.getenv("ALLOWED_ORIGINS", "").split(","):
+        extra = urlsplit(item.strip())
+        if extra.netloc:
+            allowed.add(extra.netloc.lower())
+    return parts.netloc.lower() in allowed
+
+
+@app.middleware("http")
+async def security_guard(request: Request, call_next):
+    """
+    CSRF 校验 + 安全响应头。
+
+    为什么用 Origin 校验而不是 token：本项目是服务端渲染 + 同源 fetch，没有跨域前端；
+    浏览器对跨站表单提交一定会带 Origin，校验它能挡住「已登录用户被诱导提交」，
+    且不需要改动任何页面的表单。没有 Origin/Referer 的请求（curl、服务间调用）放行——
+    它们本来就不依赖浏览器自动携带的 Cookie。
+    """
+    request.state.request_id = uuid.uuid4().hex[:12]
+    started = time.perf_counter()
+
+    if request.method in UNSAFE_METHODS and request.headers.get("cookie"):
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source and not _origin_allowed(request, source):
+            metrics.observe_request(request.method, "csrf_blocked", 403,
+                                    time.perf_counter() - started)
+            return JSONResponse(
+                status_code=403,
+                content=_envelope(1026, ERRORS[1026], request.state.request_id),
+            )
+
+    response = await call_next(request)
+    # 按路由模板统计，不用真实路径：否则每个 session_id 都是一条独立时间序列。
+    # /metrics 自身不计数，避免抓取频率把请求量指标带偏。
+    route = getattr(request.scope.get("route"), "path", None)
+    if route != "/metrics":
+        metrics.observe_request(request.method, route or "unmatched",
+                                response.status_code, time.perf_counter() - started)
+
+    for key, value in _BASE_SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    if _is_https(request):
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
+
+
 @app.middleware("http")
 async def attach_request_id(request: Request, call_next):
     """给每个请求打上 trace ID，出错时能对上日志。"""
-    request.state.request_id = uuid.uuid4().hex[:12]
+    if not getattr(request.state, "request_id", None):
+        request.state.request_id = uuid.uuid4().hex[:12]
     response = await call_next(request)
     response.headers["X-Request-Id"] = request.state.request_id
     return response
@@ -357,6 +479,21 @@ class PromptRequest(BaseModel):
 def sse(event: str, data: dict[str, Any]) -> str:
     """按 SSE 规范拼一帧：event 行 + data 行 + 空行结尾。"""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _track_sse(stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    """
+    统计活跃 SSE 连接数。
+
+    包一层而不是改 event_stream 本身：客户端关页面时生成器会被取消，
+    finally 一定执行，计数不会泄漏。指标只是观测，不该入侵业务生成器。
+    """
+    metrics.sse_started()
+    try:
+        async for chunk in stream:
+            yield chunk
+    finally:
+        metrics.sse_finished()
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +632,7 @@ async def chat(
         })
 
     return StreamingResponse(
-        event_stream(),
+        _track_sse(event_stream()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -612,9 +749,17 @@ async def submit_dispute(draft_id: str, user: dict[str, Any] = Depends(require_a
 # ---------------------------------------------------------------------------
 
 @app.get("/api/agent/runs")
-async def list_agent_runs(limit: int = 20, user: dict[str, Any] = Depends(require_api_user)):
-    """我自己的执行记录。管理员可以另开一个视图看全员。"""
-    return {"runs": await db.list_runs(user["id"], limit=min(limit, 100))}
+async def list_agent_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    user: dict[str, Any] = Depends(require_api_user),
+):
+    """
+    我自己的执行记录。
+
+    limit 用 Query 声明上下界，而不是 min(limit, 100)：负数会让
+    SQLite 的 `LIMIT -1` 变成「不限制」，一次返回全部历史。
+    """
+    return {"runs": await db.list_runs(user["id"], limit=limit)}
 
 
 @app.get("/api/agent/runs/{run_id}")
@@ -719,7 +864,12 @@ async def admin_upload_document(
     if file.size and file.size > MAX_UPLOAD_BYTES:
         raise ApiError(1008, "上传文件过大，请控制在 5MB 以内", status=400)
 
-    content = await file.read()
+    # 只读上限 +1 字节：分块传输时 file.size 可能为 None，上一行的快路径会失效。
+    # 若不限量地 read()，一个几百 MB 的请求就能把整个进程内存顶满——
+    # 这是上传接口最容易被忽略的 DoS 面。
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ApiError(1008, "上传文件过大，请控制在 5MB 以内", status=400)
     if not content:
         raise ApiError(1003, "文件内容为空，请重新选择", status=400)
 
@@ -974,14 +1124,111 @@ async def admin_purge_logs(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-async def health():
-    """不需要鉴权，便于运维探活；但不返回任何密钥信息。"""
+async def health(user: dict[str, Any] = Depends(require_api_user)):
+    """
+    知识库与模型状态。
+
+    需要登录：响应里有切片数、文档清单与模型名，属于内部运维信息。
+    给负载均衡/编排用的无鉴权探针是 `/healthz` 与 `/readyz`，两者都不含业务细节。
+    """
     stats = kb_service.stats()
     return {
         "status": "ok" if stats["ready"] else "degraded",
         "knowledge_base": stats,
         "llm": llm.provider_info(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 探针：给容器编排用的两个独立问题
+# ---------------------------------------------------------------------------
+# 「活着」和「能接流量」不是一回事。合成一个端点会让编排无法区分
+# 「依赖还没加载完」和「进程卡死」——前者不该重启，后者必须重启。
+
+_STARTED_AT = time.time()
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """
+    存活探针：进程还在事件循环里能响应就返回 200。
+
+    刻意不查数据库和索引：磁盘慢、索引重建中都不该导致容器被杀。
+    """
+    return {
+        "status": "ok",
+        "uptime_sec": int(time.time() - _STARTED_AT),
+        "version": __version__,
+    }
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz():
+    """
+    就绪探针：现在能不能接流量。失败返回 503，让编排摘掉实例，但不重启。
+
+    三项检查全部是本地状态，不发任何网络请求——探针自己不能成为故障源。
+    """
+    db_state = await db.health()
+    kb = kb_service.stats()
+    model = llm.provider_info()
+
+    db_detail = f"{db_state['latency_ms']}ms · {db_state['size_bytes']} bytes"
+    if db_state["error"]:
+        db_detail += f" · {db_state['error']}"
+    kb_detail = f"{kb['document_count']} 份文档 / {kb['chunk_count']} 切片"
+    if kb.get("error"):
+        kb_detail += f" · {kb['error']}"
+    model_detail = f"{model.get('provider')} / {model.get('model')}"
+    if model.get("mock"):
+        model_detail += "（mock 模式，未接入真实模型）"
+
+    checks = [
+        {"name": "database", "ok": bool(db_state["ok"]), "detail": db_detail},
+        {"name": "knowledge_base", "ok": bool(kb["ready"]), "detail": kb_detail},
+        {"name": "model", "ok": bool(model.get("model")), "detail": model_detail},
+    ]
+    ready = all(item["ok"] for item in checks)
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request):
+    """
+    Prometheus 文本格式指标。
+
+    默认只允许本机访问：指标里带会话量、待确认数这类运营数据，
+    不该因为「忘了配鉴权」就暴露到公网。跨机抓取时设置 METRICS_TOKEN。
+    """
+    if (os.getenv("METRICS_ENABLED", "1") or "").lower() in ("0", "false", "no", "off"):
+        raise ApiError(1011, "指标接口已关闭", status=403)
+
+    token = (os.getenv("METRICS_TOKEN") or "").strip()
+    if token:
+        supplied = request.headers.get("authorization", "")
+        if supplied != f"Bearer {token}" and request.query_params.get("token") != token:
+            raise ApiError(1011, "指标接口令牌不正确", status=403)
+    else:
+        client = (request.client.host if request.client else "") or ""
+        # 带 X-Forwarded-For 说明请求是经过代理转进来的：此时 client.host 是代理地址，
+        # 同机部署下必然是 127.0.0.1，只看 IP 会把「所有外部请求」当成本机。
+        proxied = bool(request.headers.get("x-forwarded-for"))
+        if proxied or client not in ("127.0.0.1", "::1", "localhost"):
+            raise ApiError(1011, "指标接口默认仅允许本机访问；跨机抓取请设置 METRICS_TOKEN",
+                           status=403)
+
+    db_state = await db.health()
+    kb = kb_service.stats()
+    body = metrics.render(version=__version__, extra={
+        "logistics_pending_confirms": await db.count_pending_confirms(),
+        "logistics_db_size_bytes": db_state["size_bytes"],
+        "logistics_knowledge_chunks": kb["chunk_count"],
+        "logistics_knowledge_documents": kb["document_count"],
+    })
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1252,44 @@ def _cookie_secure(request: Request) -> bool:
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     return proto.split(",")[0].strip().lower() == "https"
 
+
+def _client_ip(request: Request) -> str:
+    """
+    取客户端 IP，作为登录限流的键。
+
+    只认 `request.client.host`：uvicorn 在 `--proxy-headers` 且
+    `FORWARDED_ALLOW_IPS` 配置正确时，会把它还原成真实来源。
+    这里**不**直接读 `X-Forwarded-For`——那个头任何客户端都能伪造，
+    拿它当限流键等于给攻击者一个「换 IP 就重置计数」的开关。
+    """
+    client = request.client
+    return client.host if client and client.host else "unknown"
+
+
+def _safe_next(raw: str) -> str | None:
+    r"""
+    校验登录后的跳转目标，只允许站内相对路径。
+
+    除了 `//evil.com`，还要挡 `/\evil.com` 与 `/%5Cevil.com`：
+    浏览器把反斜杠当斜杠处理，这两者都会被解析成协议相对 URL，
+    从而跳到外站。所以先解码再判断形状，返回值仍用原始串。
+
+    制表符与换行也一并拒绝：`Location: /\t/evil.com` 在部分客户端里
+    会被当作合法相对路径，同时又能骗过简单的字符串前缀检查。
+    """
+    if not raw:
+        return None
+    decoded = unquote(raw)
+    if not decoded.startswith("/") or decoded.startswith("//"):
+        return None
+    if "\\" in decoded or "\t" in decoded or "\n" in decoded or "\r" in decoded:
+        return None
+    parts = urlsplit(decoded)
+    if parts.scheme or parts.netloc:
+        return None
+    return raw
+
+
 def _layout_ctx(request: Request, user: dict[str, Any], active: str) -> dict[str, Any]:
     """后台页面公共上下文：侧边栏、顶栏和底部状态都要用。"""
     info = llm.provider_info()
@@ -1023,7 +1308,10 @@ async def login_page(request: Request, next: str = ""):
     if user:
         return RedirectResponse("/admin" if auth.is_admin(user) else "/", status_code=303)
     return templates.TemplateResponse(
-        request, "login.html", {"error": None, "username": "", "next": next}
+        request,
+        "login.html",
+        {"error": None, "username": "", "next": next,
+         "demo_accounts": await auth.demo_account_hints()},
     )
 
 
@@ -1035,32 +1323,58 @@ async def login_submit(
     next: str = Form(default=""),
 ):
     username = username.strip()
+    # 只在真的还在用演示口令时才在页面上提示，避免轮换后给出过期口令
+    demo_accounts = await auth.demo_account_hints()
 
     def _failed(message: str):
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": message, "username": username, "next": next},
+            {"error": message, "username": username, "next": next,
+             "demo_accounts": demo_accounts},
             status_code=400,
         )
 
     if not username or not password:
         return _failed("请输入用户名和密码")
 
+    # 防爆破：在验口令之前拦，超限的请求不消耗 PBKDF2 的 CPU。
+    # IP 与账号两个维度都要看——只按 IP 的话换代理即可继续打同一账号，
+    # 只按账号的话一个 IP 轮着试一堆用户名不会触发。
+    ip = _client_ip(request)
+    try:
+        ratelimit.login_guard.check(ip, username)
+    except ratelimit.RateLimitExceeded as exc:
+        response = templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": exc.message, "username": username, "next": next},
+            status_code=429,
+        )
+        response.headers["Retry-After"] = str(exc.retry_after)
+        return response
+
     user = await db.get_user_by_username(username)
-    # 密码校验是 CPU 密集的（20 万次 PBKDF2），放线程池里避免卡住事件循环
-    ok = user is not None and await asyncio.to_thread(
-        auth.verify_password, password, user["password_hash"]
-    )
+    # 密码校验是 CPU 密集的（20 万次 PBKDF2），放线程池里避免卡住事件循环。
+    # 账号不存在时也走一次同等代价的哈希（verify_dummy），否则「查无此人」
+    # 会明显更快返回，攻击者用响应时间就能把用户名枚举出来。
+    if user is None:
+        await asyncio.to_thread(auth.verify_dummy, password)
+        ratelimit.login_guard.record_failure(ip, username)
+        return _failed("用户名或密码不正确")
+    ok = await asyncio.to_thread(auth.verify_password, password, user["password_hash"])
     if not ok:
+        ratelimit.login_guard.record_failure(ip, username)
         # 不区分「用户不存在」和「密码错误」，避免被用来枚举账号
         return _failed("用户名或密码不正确")
     if not user.get("is_active"):
+        ratelimit.login_guard.record_failure(ip, username)
         return _failed("该账号已被停用，请联系管理员")
 
+    ratelimit.login_guard.record_success(ip, username)
     token = auth.create_token(user)
-    # next 只接受站内相对路径，防止被构造成开放重定向
-    target = next if next.startswith("/") and not next.startswith("//") else None
+    # next 只接受站内相对路径，防止被构造成开放重定向（见 _safe_next）
+    target = _safe_next(next)
     if not target:
         target = "/admin" if user["role"] == auth.ROLE_ADMIN else "/"
 
@@ -1068,7 +1382,7 @@ async def login_submit(
     response.set_cookie(
         auth.COOKIE_NAME,
         token,
-        max_age=3600 * 8,
+        max_age=auth.TOKEN_HOURS * 3600,   # 跟令牌有效期走，不再写死 8 小时
         httponly=True,      # JS 读不到，XSS 也偷不走
         samesite="lax",     # 阻断跨站表单提交携带
         secure=_cookie_secure(request),

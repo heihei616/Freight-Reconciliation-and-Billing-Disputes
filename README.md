@@ -40,7 +40,15 @@
 | 提示词模板 | 后台维护补充要求，保存即生效；每次保存留快照，可回滚 | `/admin/prompt` + `prompt_revisions` |
 | 日志保留 | 按天清理运行日志，业务单据不受影响；可预演、可手动执行 | `LOG_RETENTION_DAYS` |
 | 限流与配额 | 滑动窗口限流、每日配额、全局并发闸门 | `ratelimit.py` |
+| 登录防爆破 | 账号 / IP 双维度失败计数，超限 429 + Retry-After；账号不存在也走等价哈希，避免计时枚举 | `ratelimit.LoginGuard` |
 | 日志脱敏 | 密钥、手机号、身份证在落库前统一脱敏 | `utils/masking.py` |
+| 启动自检 | 配置类型/范围校验；生产模式强制密钥与 Secure Cookie，不合规拒绝启动 | `utils/config.py` |
+| 健康探针 | `/healthz` 存活、`/readyz` 就绪（数据库/索引/模型三项），失败带明细 | 内置路由 |
+| 运行指标 | Prometheus 文本格式：请求量、耗时、SSE 活跃数、确认积压、库大小 | `/metrics` |
+| 备份恢复 | 在线一致性快照、完整性校验、单文件可独立使用、恢复前自动另存 | `scripts/backup_db.py` |
+| 凭证轮换 | 列出仍在用演示口令的账号；交互改密 / 随机生成 / 自动化输入；写库后回读校验 | `scripts/set_password.py` |
+| 首次引导 | 开发环境播种演示账号，生产不播种；空库用 `ADMIN_INITIAL_PASSWORD` 建首个管理员，避免「起了但没人能登录」 | `auth.ensure_initial_accounts()` |
+| 容器交付 | 多阶段镜像、非 root 运行、内置健康检查、compose 编排 | `Dockerfile` |
 
 ## 快速开始
 
@@ -50,7 +58,7 @@
 - 无需数据库服务，SQLite 随进程启动自动建表
 - 可选：任意 OpenAI 兼容的模型与向量接口（不配也能用 mock 跑通界面）
 
-### 五步启动
+### 六步启动
 
 ```bash
 # 1. 取代码并进入目录
@@ -68,18 +76,26 @@ pip install -e .
 # 4. 准备配置：不填密钥也能启动，但回答会走 mock
 cp .env.example .env
 
-# 5. 启动
+# 5. 上线预检：环境、依赖、目录权限、数据库、密钥强度逐项过一遍
+PYTHONPATH=src python scripts/preflight.py
+
+# 6. 启动
 logistics-agent
 ```
 
-浏览器打开 <http://127.0.0.1:8000>，用下列演示账号登录：
+浏览器打开 <http://127.0.0.1:8000>。开发环境首次启动会自动创建两个演示账号：
 
-| 账号 | 密码 | 角色 | 能做什么 |
+| 账号 | 初始口令 | 角色 | 能做什么 |
 |---|---|---|---|
 | `employee` | `emp123` | 员工 | 提问、核对账单、提交自己名下的争议草稿 |
 | `admin` | `admin123` | 管理员 | 额外可进 `/admin` 维护知识库、提示词与审计 |
 
-> 这两个口令写在代码里用于本地演示，**部署前必须更换**，详见[上线前检查清单](docs/prelaunch_checklist.md)。
+> 这两个口令随代码发版，**只能用于本地**。`APP_ENV=production` 时不会播种，
+> 首次启动改用 `ADMIN_INITIAL_PASSWORD` 建第一个管理员（见
+> [运维手册 6.1](docs/operations.md)）。若这个实例已经轮换过口令，
+> 初始值在 `data/runtime/credentials.local.txt`（忽略项，不入库）；
+> 随时可用 `python scripts/set_password.py --list` 查状态，
+> `--user admin --generate` 重置一条。
 
 ### 离线（装不上依赖）时的启动方式
 
@@ -91,6 +107,23 @@ PYTHONPATH=src python -m logistics_agent.main
 ```
 
 仓库自带的脚本与测试都做了同样的回退处理，不安装也能跑。
+
+### Docker 启动（交付环境推荐）
+
+```bash
+cp .env.example .env            # 填模型密钥；生产再设 JWT_SECRET 与 COOKIE_SECURE=1
+docker compose up -d --build
+docker compose ps               # 等 STATUS 变成 healthy
+```
+
+数据库、索引、知识库文档与备份都在命名卷里，容器重建不丢。
+生产环境显式声明 `APP_ENV=production`，启动校验会强制要求完整的安全配置：
+
+```bash
+APP_ENV=production docker compose up -d
+```
+
+完整的部署拓扑、探针语义、备份恢复与故障处置见[运维手册](docs/operations.md)。
 
 ## 三分钟演示脚本
 
@@ -193,8 +226,11 @@ PYTHONPATH=src python -m logistics_agent.main
 所有检查都不依赖网络与模型，可在离线环境跑完。
 
 ```bash
-# 88 条离线单元测试（约 0.7 秒）
+# 256 条离线单元测试（约 6 秒）
 python -m unittest discover -s tests -v
+
+# 上线预检：配置、依赖、数据库、密钥、磁盘、备份新鲜度
+PYTHONPATH=src python scripts/preflight.py
 
 # 仓库规范：编码、换行、行尾空白、密钥扫描、必备文件
 python scripts/check_repo.py
@@ -210,6 +246,13 @@ python scripts/check_gates.py
 
 # 需要服务已启动：验证确认接口读写同一份状态（11 项断言，不调用模型）
 PYTHONPATH=src python scripts/check_confirm_api.py
+
+# 在线备份：服务运行中也能取一致性快照，备份后自动校验
+PYTHONPATH=src python scripts/backup_db.py
+
+# 初始凭证轮换：先看谁还在用演示口令，再逐个改密
+PYTHONPATH=src python scripts/set_password.py --list
+PYTHONPATH=src python scripts/set_password.py --user admin
 
 # 离线业务示例：运费推导 + 三张账单结论
 python examples/demo.py
@@ -254,20 +297,21 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 │   ├── llm.py                   # 模型客户端与流式解析
 │   ├── db.py                    # SQLite 数据层
 │   ├── auth.py                  # JWT + HttpOnly Cookie 鉴权
+│   ├── metrics.py               # Prometheus 文本格式指标（零依赖）
 │   ├── ratelimit.py             # 限流、配额、并发闸门
 │   ├── core/domain.py           # 业务事实与确定性计算
 │   ├── utils/paths.py           # 统一路径
-│   ├── utils/config.py          # 非机密配置读取
+│   ├── utils/config.py          # 配置读取与启动校验（范围、枚举、生产守卫）
 │   ├── utils/text.py            # 文本规范化与截断
 │   ├── utils/masking.py         # 日志脱敏
 │   ├── static/                  # 员工端页面与样式
 │   └── templates/               # 管理端 Jinja2 模板
 ├── data/knowledge/              # 唯一参与 RAG 索引的制度语料
 ├── data/runtime/                # 本地 SQLite（已忽略，不上传）
-├── docs/                        # 设计、API、上线清单、实测轨迹
-├── tests/                       # 88 条离线测试 + 评测数据
+├── docs/                        # 设计、API、运维手册、上线清单、实测轨迹
+├── tests/                       # 256 条离线测试 + 评测数据
 ├── examples/                    # 离线示例与轨迹回放
-├── scripts/                     # 自检、校验、构建、部署
+├── scripts/                     # 自检、预检、备份、改密、构建、部署
 ├── config/default.yaml          # 非机密默认配置
 ├── Makefile                     # 常用任务入口
 └── .github/                     # CI 与协作模板
@@ -318,22 +362,24 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 
 ## 安全与部署边界
 
-当前定位是**单实例内部系统**，不是开箱即用的生产系统：
+当前定位是**单实例内部系统**，可以交付给一个小团队长期使用，但不是开箱即用的多租户 SaaS：
 
-- 人工确认的状态已存进 SQLite，多 worker 可以正确处理；但**限流计数仍在进程内存**，多实例会把每用户额度放大成「每实例额度」，横向扩展前要先把计数器换到 Redis；
-- 演示口令随代码发版，部署前必须更换；
-- SQLite 适合小团队，并发写入靠全局锁串行化，人多了要换 PostgreSQL；
-- 日志保留期已内置（`LOG_RETENTION_DAYS`，默认 90 天），备份恢复仍需按你们的要求另配。
+- 启动前会校验配置；`APP_ENV=production` 下缺模型密钥、`JWT_SECRET` 过短、Cookie 未加 Secure、账号仍用演示口令，都会**拒绝启动**，不会带着问题上线；
+- 人工确认状态已存进 SQLite，多 worker 可以正确处理；但**限流计数仍在进程内存**，多实例会把每用户额度放大成「每实例额度」，横向扩展前要先把计数器换到 Redis；
+- SQLite 适合 3~5 人的并发写入，人多了要换 PostgreSQL；
+- 备份、探针、指标、日志保留都已内置，日常运维不需要额外组件；生产环境开启指标必须配 `METRICS_TOKEN`（同机反代下「仅本机」判断会失效），否则拒绝启动；
+- 演示口令随代码发版，部署前必须更换：`scripts/set_password.py --list` 会标出还在用演示口令的账号，改完回读校验；改密不会让已签发的令牌立刻失效（最长 8 小时），要立即踢下线需轮换 `JWT_SECRET`。
 
-正式上线前请逐项完成[上线前检查清单](docs/prelaunch_checklist.md)。
+部署拓扑、上线顺序、告警建议、备份恢复与故障处置，见[运维手册](docs/operations.md)。正式上线前请逐项完成[上线前检查清单](docs/prelaunch_checklist.md)。
 
 ## 文档
 
 - [设计说明](docs/design.md)：分层理由、闸门取舍、已知限制
+- [运维手册](docs/operations.md)：部署形态、上线流程、探针、指标、备份恢复、故障处置
 - [API 说明](docs/api.md)：全部接口、错误码、SSE 事件
 - [测试说明](docs/testing.md)：测试分层、如何新增用例
 - [Agent 实测轨迹](docs/agent_loop_trajectories.md)：三条真实对话的逐轮记录
-- [上线前检查清单](docs/prelaunch_checklist.md)：五个维度 25 项，含负责人与通过标准
+- [上线前检查清单](docs/prelaunch_checklist.md)：六个维度 37 项，含负责人与通过标准
 - [贡献指南](CONTRIBUTING.md)
 - [更新记录](CHANGELOG.md)
 

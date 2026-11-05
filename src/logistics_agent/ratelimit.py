@@ -253,3 +253,139 @@ class _Slot:
 
 # 应用级单例：app.py 在启动时覆盖为 from_env() 的配置
 limiter = RateLimiter(RateLimitConfig())
+
+
+# ---------------------------------------------------------------------------
+# 登录防爆破
+# ---------------------------------------------------------------------------
+# 提问限流保护的是模型额度，登录限流保护的是账号本身。两者不能共用一个桶：
+# 前者按用户分（已登录才知道是谁），后者必须在**登录之前**生效，只能按 IP 与
+# 提交的用户名分。
+#
+# 为什么两个维度都要有：
+#   * 只按 IP：攻击者换代理就能继续打同一个账号；
+#   * 只按用户名：攻击者用一个 IP 轮着试一堆用户名（撞库/撒网）不会触发。
+# 所以失败次数同时记在 IP 与用户名上，任一超限就拒绝。
+
+
+@dataclass
+class LoginGuardConfig:
+    """登录失败阈值。默认值按「内网小团队」设定，可用环境变量覆盖。"""
+
+    enabled: bool = True
+    max_failures: int = 5          # 同一账号窗口内允许的失败次数
+    window_seconds: int = 900      # 账号维度的窗口（15 分钟）
+    ip_max_failures: int = 20      # 同一 IP 窗口内允许的失败次数
+    ip_window_seconds: int = 300   # IP 维度的窗口（5 分钟）
+
+    @classmethod
+    def from_env(cls) -> "LoginGuardConfig":
+        def _int(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return default
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                return default
+
+        enabled = os.getenv("LOGIN_GUARD_ENABLED", "1").strip().lower() not in {
+            "0", "false", "off", "no",
+        }
+        return cls(
+            enabled=enabled,
+            max_failures=_int("LOGIN_MAX_FAILURES", 5),
+            window_seconds=_int("LOGIN_WINDOW_SECONDS", 900),
+            ip_max_failures=_int("LOGIN_IP_MAX_FAILURES", 20),
+            ip_window_seconds=_int("LOGIN_IP_WINDOW_SECONDS", 300),
+        )
+
+
+class LoginGuard:
+    """
+    登录失败计数。
+
+    只统计失败：成功登录会清掉该用户名的计数，但**不清 IP 计数**——
+    否则攻击者拿一个自己的合法账号登录一次就能重置 IP 桶，撒网攻击不受限。
+
+    计数同样在单进程内存里，与其他限流器保持一致的取舍：
+    多实例部署时每个实例各自计数，实际阈值被放大 N 倍。要严格限制需换 Redis。
+    """
+
+    def __init__(self, config: LoginGuardConfig | None = None):
+        self.config = config or LoginGuardConfig()
+        self._users: dict[str, Deque[float]] = defaultdict(deque)
+        self._ips: dict[str, Deque[float]] = defaultdict(deque)
+
+    @staticmethod
+    def _prune(hits: Deque[float], now: float, window: int) -> None:
+        cutoff = now - window
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+
+    def _retry_after(self, hits: Deque[float], now: float, window: int) -> int:
+        """最旧那次失败滑出窗口还需要多久（秒）。"""
+        if not hits:
+            return 0
+        return max(1, int(window - (now - hits[0])))
+
+    def check(self, ip: str, username: str) -> None:
+        """在验证口令之前调用。超限抛 RateLimitExceeded，不消耗任何计算。"""
+        if not self.config.enabled:
+            return
+        now = time.monotonic()
+        user_hits = self._users.get(username) or deque()
+        ip_hits = self._ips.get(ip) or deque()
+        self._prune(user_hits, now, self.config.window_seconds)
+        self._prune(ip_hits, now, self.config.ip_window_seconds)
+
+        if len(user_hits) >= self.config.max_failures:
+            retry = self._retry_after(user_hits, now, self.config.window_seconds)
+            raise RateLimitExceeded(
+                f"该账号密码错误次数过多，请 {max(1, retry // 60)} 分钟后再试",
+                retry_after=retry,
+            )
+        if len(ip_hits) >= self.config.ip_max_failures:
+            retry = self._retry_after(ip_hits, now, self.config.ip_window_seconds)
+            raise RateLimitExceeded(
+                f"登录尝试过于频繁，请 {max(1, retry)} 秒后再试",
+                retry_after=retry,
+            )
+
+    def record_failure(self, ip: str, username: str) -> None:
+        if not self.config.enabled:
+            return
+        now = time.monotonic()
+        self._users[username].append(now)
+        self._ips[ip].append(now)
+        self._sweep(now)
+
+    def record_success(self, ip: str, username: str) -> None:
+        """登录成功只清账号维度；IP 维度的失败记录按窗口自然过期。"""
+        self._users.pop(username, None)
+
+    def _sweep(self, now: float) -> None:
+        """
+        偶尔清一次过期键，避免被大量随机用户名撑爆内存。
+
+        攻击者可以用随机用户名制造几十万个空窗口，所以这里不能只依赖
+        「下次访问时清理」——那些键可能再也不会被访问。
+        """
+        if len(self._users) < 1000 and len(self._ips) < 1000:
+            return
+        for key, hits in list(self._users.items()):
+            self._prune(hits, now, self.config.window_seconds)
+            if not hits:
+                self._users.pop(key, None)
+        for key, hits in list(self._ips.items()):
+            self._prune(hits, now, self.config.ip_window_seconds)
+            if not hits:
+                self._ips.pop(key, None)
+
+    def reset(self) -> None:
+        """只用于测试。"""
+        self._users.clear()
+        self._ips.clear()
+
+
+login_guard = LoginGuard(LoginGuardConfig())

@@ -34,7 +34,26 @@ from logistics_agent import db  # noqa: E402
 
 BASE = os.getenv("CHECK_BASE_URL", "http://127.0.0.1:8000")
 USERNAME = os.getenv("DEMO_EMPLOYEE_USER", "employee")
-PASSWORD = os.getenv("DEMO_EMPLOYEE_PASSWORD", "emp123")
+
+
+def _resolve_password() -> str:
+    """
+    口令来源：环境变量 → 本地凭据文件 → 演示口令。
+
+    本机轮换过口令后，写死 `emp123` 只会让这个自检假失败；而它要验的是
+    确认状态机，不是口令。凭据文件由 `scripts/set_password.py` 所在流程
+    生成，已在 .gitignore 中，读它有值就用它。
+    """
+    from_env = os.getenv("DEMO_EMPLOYEE_PASSWORD")
+    if from_env:
+        return from_env
+    cred_file = Path(__file__).resolve().parent.parent / "data" / "runtime" / "credentials.local.txt"
+    if cred_file.exists():
+        for line in cred_file.read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if len(fields) == 2 and fields[0].strip() == USERNAME:
+                return fields[1].strip()
+    return "emp123"
 
 CONFIRM_ID = f"cf_smoke_{int(time.time())}"
 EDITED = "员工在确认前改过的争议说明正文。"
@@ -79,14 +98,18 @@ def login() -> str:
     conn = http.client.HTTPConnection(parts.hostname or "127.0.0.1",
                                       parts.port or 80, timeout=20)
     conn.request("POST", "/auth/login",
-                 body=urllib.parse.urlencode({"username": USERNAME, "password": PASSWORD}),
+                 body=urllib.parse.urlencode({"username": USERNAME,
+                                              "password": _resolve_password()}),
                  headers={"Content-Type": "application/x-www-form-urlencoded"})
     resp = conn.getresponse()
     cookie = resp.getheader("Set-Cookie") or ""
     resp.read()
     conn.close()
     if not cookie:
-        raise RuntimeError(f"登录失败：状态 {resp.status}，没有拿到 Set-Cookie")
+        raise RuntimeError(
+            f"登录失败：状态 {resp.status}，没有拿到 Set-Cookie。"
+            f"账号 {USERNAME} 的口令可能已被轮换——"
+            "设 DEMO_EMPLOYEE_PASSWORD，或把新口令写进 data/runtime/credentials.local.txt")
     return cookie.split(";")[0]
 
 

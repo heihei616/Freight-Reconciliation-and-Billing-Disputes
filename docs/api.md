@@ -1,6 +1,6 @@
 # API 说明
 
-服务启动后可访问 `/docs` 查看 FastAPI 自动生成的接口文档。除登录、健康检查和静态资源外，接口使用 JWT HttpOnly Cookie，也支持 `Authorization: Bearer <token>`。
+服务启动后可访问 `/docs` 查看 FastAPI 自动生成的接口文档。除登录页、两个探针（`/healthz`、`/readyz`）与静态资源外，接口使用 JWT HttpOnly Cookie，也支持 `Authorization: Bearer <token>`。
 
 **鉴权约定**：页面请求未登录会 303 跳转到登录页；接口请求返回 401 + JSON 信封。
 
@@ -50,6 +50,7 @@
 | 1023 | 404 | 提示词版本不存在 | 版本已被清理 |
 | 1024 | 400 | 保留天数不合法 | 需在 1~3650 之间 |
 | 1025 | 404 | 审计记录不存在 | run_id 拼错或日志已清理 |
+| 1026 | 403 | 跨站请求被拒绝 | 带 Cookie 的写请求来自其他站点；检查 `ALLOWED_ORIGINS` |
 | 2001 | 503 | 知识库尚未就绪 | 索引还没建完 |
 | 2002 | 503 | 尚未配置大模型 | 缺 LLM_API_KEY |
 | 3001 | 200 | 检索失败 | 向量服务异常 |
@@ -65,6 +66,17 @@
 | GET | `/login` | 登录页；支持 `?next=` 回跳 |
 | POST | `/auth/login` | 表单字段 `username`、`password`、`next`；成功返回 303 并设置 HttpOnly Cookie |
 | POST | `/auth/logout` | 删除登录 Cookie，303 回登录页 |
+
+登录失败有两种响应，都是 HTML 登录页（这是浏览器表单，不是 JSON 接口）：
+
+| 状态 | 触发条件 | 响应 |
+|---|---|---|
+| 400 | 用户名或密码不正确 / 账号已停用 | 页面内提示，不区分「账号不存在」与「密码错误」 |
+| 429 | 同一账号 15 分钟内失败 5 次，或同一 IP 5 分钟内失败 20 次 | 页面内提示 + `Retry-After` 头 |
+
+两个阈值的维度是分开的：只按 IP 的话，攻击者换代理就能继续打同一个账号；只按账号的话，一个 IP 轮着试一堆用户名（撞库）不会触发。登录成功只清账号计数，不清 IP 计数——否则攻击者拿自己的合法账号登录一次就能重置 IP 桶。
+
+阈值可用 `LOGIN_MAX_FAILURES`、`LOGIN_WINDOW_SECONDS`、`LOGIN_IP_MAX_FAILURES`、`LOGIN_IP_WINDOW_SECONDS` 调整。
 | GET | `/api/auth/me` | 当前用户 `{id, username, display_name, role}` |
 
 ## 员工接口
@@ -149,7 +161,7 @@ meta → status* → [state] → (tool_call → tool_result)* → sources
 | POST | `/api/disputes/{draft_id}/submit` | 员工提交草稿；模型没有这个工具 |
 | GET | `/api/agent/runs?limit=20` | 当前用户的 Agent 运行记录 |
 | GET | `/api/agent/runs/{run_id}` | 单次运行的逐轮决策与工具轨迹 |
-| GET | `/api/health` | 知识库与模型状态，不返回密钥 |
+| GET | `/api/health` | 知识库与模型状态（需登录，不返回密钥与 `base_url`） |
 
 `GET /api/health` 返回示例：
 
@@ -223,6 +235,7 @@ meta → status* → [state] → (tool_call → tool_result)* → sources
 用 curl 走一遍完整链路（Cookie 由登录接口下发）：
 
 ```bash
+# 开发环境首次启动的演示口令是 emp123；若已轮换，换成实际口令
 curl -c cookie.txt -X POST http://127.0.0.1:8000/auth/login \
   -d "username=employee&password=emp123"
 
@@ -238,3 +251,66 @@ curl -b cookie.txt -N -X POST http://127.0.0.1:8000/api/chat \
 默认每用户每分钟 10 次提问、每日 200 次模型调用、全局最多 4 个 Agent 循环并发。超限返回 429 与对应错误码，`message` 里带剩余等待秒数。
 
 参数可通过环境变量调整（见 `.env.example`），`RATE_LIMIT_ENABLED=0` 可整体关闭，仅建议本地调试使用。
+
+## 运维探针与指标
+
+| 端点 | 鉴权 | 用途 |
+|---|---|---|
+| `GET /healthz` | 无 | 存活探针：进程能响应就 200，不查任何依赖 |
+| `GET /readyz` | 无 | 就绪探针：200 可接流量，503 应摘流量 |
+| `GET /api/health` | 需登录 | 人读的详细状态（模型名、切片数）；不含 `base_url` |
+| `GET /metrics` | 默认仅本机（带 `X-Forwarded-For` 视为非本机）；或 Bearer / `?token=` | Prometheus 文本格式 |
+
+`/readyz` 的响应结构固定为三项检查，失败时 HTTP 状态改 503：
+
+```json
+{
+  "status": "not_ready",
+  "checks": [
+    {"name": "database", "ok": true, "detail": "0.17ms · 909312 bytes"},
+    {"name": "knowledge_base", "ok": false, "detail": "0 份文档 / 0 切片 · 索引尚未加载"},
+    {"name": "model", "ok": true, "detail": "openai / qwen3.8-flash"}
+  ]
+}
+```
+
+`/metrics` 的访问控制：未设 `METRICS_TOKEN` 时只允许回环地址（`127.0.0.1`、`::1`）；
+跨机抓取必须设置 token，请求带 `Authorization: Bearer <token>` 或 `?token=<token>`。
+`METRICS_ENABLED=0` 可整体关闭。
+
+指标清单：
+
+| 指标 | 类型 | 标签 |
+|---|---|---|
+| `logistics_build_info` | gauge | `version` |
+| `logistics_uptime_seconds` | gauge | — |
+| `logistics_sse_active` | gauge | — |
+| `logistics_http_requests_total` | counter | `method`、`route`（路由模板）、`status` |
+| `logistics_http_request_seconds_sum/count` | summary | `method`、`route` |
+| `logistics_pending_confirms` | gauge | — |
+| `logistics_db_size_bytes` | gauge | — |
+| `logistics_knowledge_chunks` / `_documents` | gauge | — |
+
+`route` 用的是路由模板而不是真实路径（`/api/sessions/{session_id}`），
+避免每个会话 ID 生成一条独立时间序列。
+
+## 安全响应头与 CSRF
+
+所有响应统一带以下头，不需要调用方处理：
+
+```
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: no-referrer
+Permissions-Policy: geolocation=(), microphone=(), camera=()
+Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'self'; ...
+```
+
+HTTPS 请求（包括 `X-Forwarded-Proto: https`）额外下发
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`。
+
+**写请求的 CSRF 校验**：`POST`、`PUT`、`PATCH`、`DELETE` 四类方法且携带 Cookie 时，
+服务端比对 `Origin`（缺失则看 `Referer`）的 host 是否属于本站，
+不匹配返回 403 + 1026。没有这两个头的请求（curl、服务间调用）放行——
+它们不依赖浏览器自动携带的 Cookie。前后端分开部署时，把前端域名写进
+`ALLOWED_ORIGINS`（逗号分隔）。

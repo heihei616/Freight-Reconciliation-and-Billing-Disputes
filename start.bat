@@ -23,7 +23,8 @@ echo ============================================================
 echo   Logistics Agent
 echo   Page    : http://127.0.0.1:8000
 echo   Admin   : http://127.0.0.1:8000/admin
-echo   Account : employee / emp123   admin / admin123
+echo   Account : admin / admin123  ^(first run only^)
+echo   Rotated : see data\runtime\credentials.local.txt
 echo   Stop    : Ctrl+C
 echo ============================================================
 echo.

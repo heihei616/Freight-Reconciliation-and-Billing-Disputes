@@ -56,7 +56,9 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 #   | GET | `/api/health` |    表格单元格（路径常被反引号包住）
 #   ### `POST /api/chat`       小标题
 ROUTE_RE = re.compile(
-    r"\b(GET|POST|PUT|DELETE|PATCH)\b\s*[|｜]?\s*`?\s*(/[\w\-{}/.]*)"
+    # 斜杠后必须跟至少一个路径字符，避免把「`POST` / `PUT`」这类方法枚举
+    # 误读成「方法 + 根路径」。本项目没有注册根路由，`GET /` 不属于可校验引用。
+    r"\b(GET|POST|PUT|DELETE|PATCH)\b\s*[|｜]?\s*`?\s*(/[\w{][\w\-{}/.]*)"
 )
 PY_CMD_RE = re.compile(r"python\s+((?:scripts|tests|examples)/[\w./-]+\.py)")
 

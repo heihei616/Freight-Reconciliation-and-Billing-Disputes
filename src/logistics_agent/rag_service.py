@@ -463,8 +463,16 @@ class KnowledgeBaseService:
     async def delete_document(self, filename: str) -> dict[str, Any]:
         """删除文档并重建索引；用于清理上传错的资料。"""
         safe_name = Path(filename).name
+        # 只允许删「本目录下、扩展名受支持的文件」：
+        #   * Path("..").name 仍是 ".."，DOCS_DIR/".." 存在且是目录，
+        #     直接 unlink 会抛 IsADirectoryError，变成 500；
+        #   * 目录里可能放着别的运行时文件，不能凭文件名就删。
+        if not safe_name or safe_name in (".", ".."):
+            raise FileNotFoundError("文档不存在：文件名不合法")
+        if Path(safe_name).suffix.lower() not in SUPPORTED_EXTS:
+            raise FileNotFoundError(f"文档不存在：{safe_name}")
         target = DOCS_DIR / safe_name
-        if not target.exists():
+        if not target.is_file():
             raise FileNotFoundError(f"文档不存在：{safe_name}")
         target.unlink()
         chunk_count = await self.rebuild()

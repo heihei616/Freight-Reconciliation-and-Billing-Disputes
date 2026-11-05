@@ -2,6 +2,55 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号采用语义化版本。
 
+## [1.4.0] - 2026-11-05
+
+这一版把「能演示」推到「能交付」：启动前会拒绝坏配置，运行中有探针与指标，
+出事后有备份与恢复路径，部署有镜像与编排。
+
+### 新增
+
+- **启动配置校验**（`utils/config.py`）：对 9 个数字型变量、4 个开关、2 个枚举、2 个 URL 做类型与范围检查。`LLM_TIMEOUT=90s` 这类拼写错误会在启动时直接失败，而不是等第一个请求进来才 500。
+- **生产模式守卫**：`APP_ENV=production` 时强制要求模型密钥、`JWT_SECRET`≥32 字符、`COOKIE_SECURE=1`、非 mock 模型、https 模型地址；仍在使用演示口令的账号会直接阻止启动。每一项都带修正提示，不是一句「配置错误」。
+- **存活/就绪探针**：`GET /healthz` 只回答「进程还活着」，`GET /readyz` 检查数据库可读、索引已加载、模型已配置，失败返回 503 与逐项明细。分开的原因：索引重建中应该摘流量，而不是被重启。
+- **安全响应头与 CSRF 校验**：所有响应补齐 `nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`、CSP；HTTPS 下自动加 HSTS。对带 Cookie 的写请求校验 `Origin`/`Referer` 同源，跨站提交返回 1026。
+- **Prometheus 指标**（`/metrics`，零依赖）：请求量按路由模板与状态码统计、耗时 summary、SSE 活跃数、待确认积压、数据库大小、切片数。默认只允许本机访问，跨机抓取需 `METRICS_TOKEN`。
+- **上线预检**（`scripts/preflight.py`）：一条命令检查 Python 版本、依赖、配置、目录权限、数据库完整性与可写性、演示口令、密钥强度、磁盘、端口、备份新鲜度、`.env` 权限；`--env production` 按生产标准执行，`--json` 供流水线解析，退出码可直接做发布门禁。
+- **在线备份与恢复**（`scripts/backup_db.py`）：用 SQLite 官方 backup API 取一致性快照，备份后做完整性校验、核心表行数核对，并把 WAL 合并回主文件（保证单文件可独立使用）。支持 `--verify`、`--restore`、`--keep`，恢复前会拒绝在服务运行时执行、并自动另存当前库。
+- **初始凭证轮换**（`scripts/set_password.py`）：`--list` 标出仍在用演示口令的账号，`--user` 交互改密（不回显、输两次），`--generate` 生成随机强口令，`--stdin` 供自动化。写库后立刻回读校验，确认新哈希能被登录逻辑认出来。这条补上了一个真实断点：此前预检报「仍在用演示口令」，但界面里没有改密入口，运维只能手写 PBKDF2 哈希。
+- **登录防爆破**（`ratelimit.LoginGuard`）：账号维度 15 分钟 5 次、IP 维度 5 分钟 20 次，超限返回 429 + `Retry-After`，在验证口令**之前**拦截，不消耗 PBKDF2 的 CPU。账号不存在时也走一次等价哈希，消除「查无此人响应更快」的计时差，避免用户名枚举。
+- **容器化交付**：多阶段 `Dockerfile`（非 root、内置健康检查、libgomp1 依赖）、`.dockerignore`、`docker-compose.yml`（命名卷、日志轮转、优雅停止、健康检查）。
+- **首次引导与演示账号分离**：开发环境首次启动照旧播种 `admin` / `employee`，双击就能演示；生产环境**不再播种**，空库改用 `ADMIN_INITIAL_PASSWORD`（≥12 位，走与命令行改密同一套强度规则）建出第一个管理员，库非空时该变量被忽略并提示移除。`SEED_DEMO_USERS` 可显式覆盖环境默认值，生产环境打开会被配置校验拒绝。口令策略统一收敛到 `auth.password_problems()`，启动引导与 `set_password.py` 共用一把尺子。
+- `SERVER_HOST` / `SERVER_PORT` / `FORWARDED_ALLOW_IPS` 环境变量，容器与反向代理部署不再需要改配置文件。
+- 测试从 140 条增至 256 条，新增配置校验、HTTP 加固、备份恢复、指标、凭据轮换、登录防爆破、首次引导七组共 116 条。
+
+### 变更
+
+- `scripts/check_repo.py` 增加部署产物校验：Dockerfile 里 `COPY` 的路径必须存在、不能被 `.dockerignore` 排除，compose 引用的 env 文件缺失会告警。
+- `scripts/check_repo.py` 的编码与换行检查从只扫 `*.py` 扩到文档与配置（Markdown、YAML、TOML、Dockerfile、compose 等），二进制后缀显式跳过。此前 Markdown 被写成 CRLF 不会报错，最终表现为整文件 diff。
+- `scripts/deploy.sh` 的启动参数支持代理头，并在注释里写明横向扩展前要先处理限流计数。
+- 后台总览新增「待确认建单」统计卡，与 `/metrics` 的 `logistics_pending_confirms` 同源。
+- 新增[运维手册](docs/operations.md)：部署形态、上线流程、探针语义、告警建议、备份恢复、故障处置。
+
+### 修复
+
+- **生产环境可以带着 mock 模型上线**：以前只有一句启动告警，现在直接拒绝启动。
+- **配置校验与实现不一致**：`EMBEDDING_PROVIDER` 实际支持 `local` / `api`，校验规则最初只认 `openai`，会把正常配置判成错误——现已按真实读取逻辑对齐。
+- **文档校验器误报接口**：`check_docs.py` 会把「`POST` / `PUT` / `PATCH`」这类方法枚举读成「方法 + 根路径 `/`」，导致三处假失败。正则改为要求斜杠后必须有实际路径段，文档也改用顿号分隔。
+- **预检的修复建议指向不存在的入口**：原来写「登录后台修改密码」，但系统并没有改密接口。现在改为指向 `scripts/set_password.py`，并补上了这个脚本。
+- **生产首次启动必然失败（死锁）**：旧流程无条件播种 `admin/admin123`，紧接着又因「仍在使用演示口令」拒绝启动——全新的生产库永远起不来，而报错建议的「登录后台改密码」在服务未起来时也走不通。现在生产不播种，空库由 `ADMIN_INITIAL_PASSWORD` 引导；改密报错也改成「停服后执行 `scripts/set_password.py`」这条真实可用的离线路径。
+- **`preflight` 看不见「空库 + 生产 + 无引导口令」**：这个组合的后果是容器起来就退出，日志里只有一句 `RuntimeError`。现在新增「首次引导」检查项，在部署前就给出结论。
+
+### 安全修复
+
+- **登录接口可无限重试**：没有次数限制，配合 20 万次 PBKDF2，既能让攻击者慢慢猜密码，也能被用来打满 CPU。现在按账号与 IP 双维度计数，超限 429 并给出等待时间。
+- **用户名可被计时枚举**：`user is not None and verify_password(...)` 短路求值，账号不存在时立即返回，比密码错误快几十毫秒。现在两种情况耗时一致。
+- **开放重定向绕过**：`next` 只检查了 `startswith("//")`，但 `/\evil.com`、`/%5Cevil.com` 会被浏览器当成协议相对 URL。现在先解码再校验，并拒绝反斜杠与控制字符。
+- **上传可打爆内存**：只在 `file.size` 有值时才检查大小，分块传输时该字段为 `None`，整个文件仍会被读进内存。现在按「上限 + 1」字节有界读取。
+- **`/api/health` 匿名暴露内部信息**：切片数、文档清单、模型名无需登录即可读取，且返回了 `base_url`（可能指向内网模型网关）。现在要求登录，并从 `provider_info()` 移除 `base_url`。
+- **`limit=-1` 绕过条数上限**：SQLite 把负数 `LIMIT` 当作不限制，一次能拉全部历史。改用 `Query(ge=1, le=100)` 在参数层拒绝。
+- **`/metrics` 的「仅本机」可被反向代理架空**：同机 nginx 转发时所有外部请求都来自 127.0.0.1，IP 判断形同虚设。现在带 `X-Forwarded-For` 的请求一律按非本机处理；`APP_ENV=production` 下开启指标却未配 `METRICS_TOKEN` 会拒绝启动，要求显式给令牌或显式关闭。
+- **删除文档对 `..` 返回 500**：`Path("..").name` 仍是 `..`，拼进目录后 `unlink` 抛 `IsADirectoryError`。现在只允许删除本目录下扩展名受支持的文件。
+
 ## [1.3.0] - 2026-11-05
 
 ### 新增

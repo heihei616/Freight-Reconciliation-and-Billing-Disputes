@@ -35,6 +35,9 @@ REQUIRED_FILES = (
     "requirements.txt", "requirements-dev.txt", "pyproject.toml",
     "config/default.yaml", "Makefile", ".pre-commit-config.yaml",
     "scripts/check_repo.py", "scripts/check_docs.py", "scripts/check_cases.py",
+    # 运维三件套：缺任何一个都意味着上线流程断了一环
+    # （预检、备份、改密），所以和检查脚本一样列为必需文件。
+    "scripts/preflight.py", "scripts/backup_db.py", "scripts/set_password.py",
     ".github/workflows/ci.yml",
     ".github/PULL_REQUEST_TEMPLATE.md",
 )
@@ -104,6 +107,67 @@ def iter_code_files():
             if "__pycache__" in path.parts:
                 continue
             yield path
+
+
+# 文档与配置也要守换行约定。以前这里只扫 *.py，结果 Markdown 被写成 CRLF
+# 不会报错——而这类问题会在下次 diff 里变成整文件重写，review 时极难看清。
+TEXT_ROOTS = ("docs", ".github", "config", "data/knowledge")
+ROOT_TEXT_FILES = (
+    "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE", "Makefile",
+    "Dockerfile", "docker-compose.yml", ".env.example", ".gitignore",
+    ".gitattributes", ".editorconfig", ".dockerignore", "pyproject.toml",
+    "requirements.txt", "requirements-dev.txt",
+)
+# .bat / .cmd 在 Windows 上按约定用 CRLF；其余是二进制，跳过
+SKIP_SUFFIXES = {
+    ".bat", ".cmd", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf",
+    ".woff", ".woff2", ".ttf", ".db", ".sqlite", ".zip",
+    # 研究资料里的 Office 文档不是文本，别拿 UTF-8 去解
+    ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".mp4", ".mov", ".webp", ".bmp",
+}
+
+
+def iter_text_files():
+    for rel in ROOT_TEXT_FILES:
+        path = ROOT / rel
+        if path.is_file():
+            yield path
+    for name in TEXT_ROOTS:
+        base = ROOT / name
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            if path.suffix.lower() in SKIP_SUFFIXES:
+                continue
+            yield path
+
+
+def check_text_files() -> None:
+    """
+    文档、配置等文本文件的编码与换行。
+
+    只查这三件事，不查行宽与缩进：Markdown 表格天然超长，
+    对文档套用代码规则只会制造一堆无意义的失败。
+    """
+    seen: set[Path] = set()
+    for path in iter_text_files():
+        if path in seen:
+            continue
+        seen.add(path)
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_bytes()
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{rel} 不是合法 UTF-8，请另存为 UTF-8（不要 GBK）")
+            continue
+        if b"\r\n" in raw:
+            fail(f"{rel} 含 CRLF 换行，统一为 LF（.editorconfig 已约定）")
+        if raw and not raw.endswith(b"\n"):
+            fail(f"{rel} 末尾缺少换行符")
 
 
 def check_python_files() -> None:
@@ -207,6 +271,70 @@ def check_version_consistency() -> None:
     stats["version"] = version
 
 
+def check_deployment_files() -> None:
+    """
+    部署产物也是代码。
+
+    Dockerfile 的 COPY 路径写错、compose 引用了不存在的 env_file，
+    都只有真正构建/启动时才报错。这里提前把它们变成仓库自检的失败项，
+    避免「推上去才发现镜像根本构建不出来」。
+    """
+    dockerfile = ROOT / "Dockerfile"
+    if not dockerfile.exists():
+        warn("没有 Dockerfile，容器化部署缺失")
+        return
+
+    text = dockerfile.read_text(encoding="utf-8")
+    copied_sources: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.upper().startswith("COPY "):
+            continue
+        if "--from=" in stripped:
+            continue          # 来自构建阶段的产物，不在仓库里
+        parts = [p for p in stripped.split()[1:] if not p.startswith("--")]
+        if len(parts) < 2:
+            fail(f"Dockerfile 的 COPY 指令不完整：{stripped}")
+            continue
+        for source in parts[:-1]:
+            if source.startswith("$"):
+                continue      # 变量在构建期才展开
+            copied_sources.append(source)
+            if not (ROOT / source).exists():
+                fail(f"Dockerfile 引用的路径不存在：{source}")
+
+    ignore_file = ROOT / ".dockerignore"
+    if not ignore_file.exists():
+        warn("缺少 .dockerignore，构建上下文会把 .git / 本地数据库一起传给 daemon")
+    else:
+        patterns = [
+            line.strip() for line in ignore_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        for source in copied_sources:
+            clean = source.rstrip("/")
+            for pattern in patterns:
+                # 只拦「整段前缀被排除」这种致命情况；通配符交给构建时判断
+                if "*" in pattern or "!" in pattern:
+                    continue
+                if clean == pattern or clean.startswith(pattern.rstrip("/") + "/"):
+                    fail(f"{source} 会被 .dockerignore 排除，构建必然失败")
+                    break
+
+    compose = ROOT / "docker-compose.yml"
+    if compose.exists():
+        compose_text = compose.read_text(encoding="utf-8")
+        for match in re.finditer(r"^\s*-\s*([^\s#]+\.env[^\s#]*)\s*$", compose_text, re.M):
+            env_name = match.group(1)
+            if not (ROOT / env_name).exists():
+                warn(f"compose 引用的 {env_name} 不存在（首次部署需从 .env.example 复制）")
+        stats["compose"] = "yes"
+    else:
+        warn("没有 docker-compose.yml，单机部署缺少编排文件")
+
+    stats["docker"] = "yes"
+
+
 def check_test_suite() -> None:
     tests = list((ROOT / "tests").glob("test_*.py"))
     if not tests:
@@ -225,8 +353,10 @@ def main() -> int:
     check_required_files()
     check_sensitive_files()
     check_python_files()
+    check_text_files()
     check_env_example_keys()
     check_version_consistency()
+    check_deployment_files()
     check_test_suite()
 
     print("=" * 64)

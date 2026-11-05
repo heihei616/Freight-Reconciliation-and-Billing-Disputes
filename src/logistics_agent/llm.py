@@ -40,11 +40,15 @@ def is_mock_mode() -> bool:
 
 
 def provider_info() -> dict[str, Any]:
-    """健康检查展示用，不含密钥本身。"""
+    """
+    健康检查展示用，不含密钥，也不含 base_url。
+
+    base_url 指向内网模型网关时属于基础设施信息，不该出现在任何
+    未鉴权或普通员工可见的响应里；运维排查直接看 `.env`。
+    """
     return {
         "provider": os.getenv("LLM_PROVIDER", "openai"),
         "model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        "base_url": os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
         "mock": is_mock_mode(),
         "configured": bool(os.getenv("LLM_API_KEY", "").strip()),
     }

@@ -610,10 +610,7 @@ def _overview_stats_sync() -> dict[str, Any]:
         "(flag_status IS NULL OR flag_status = 'none')"
     ).fetchone()[0]
     # 仍在等待窗口内的确认：运营最该先看这个数，大于 0 说明有人卡在闸门前
-    awaiting = conn.execute(
-        "SELECT COUNT(*) FROM pending_confirms WHERE status = 'pending' AND expires_at > ?",
-        (time.time(),),
-    ).fetchone()[0]
+    awaiting = _count_pending_confirms_sync()
     return {
         "today_messages": today_messages,
         "total_sessions": total_sessions,
@@ -1441,3 +1438,49 @@ async def list_pending_confirms(session_id: str, status: str = "pending") -> lis
 
 async def expire_stale_confirms() -> int:
     return await asyncio.to_thread(_expire_stale_confirms_sync)
+
+
+# ---------------------------------------------------------------------------
+# 健康探测：给 /readyz 用的最小查询
+# ---------------------------------------------------------------------------
+# 只做「连接可用、能读」这一件事。写探测故意不放这里：
+# BEGIN IMMEDIATE 会去抢写锁，编排每 10 秒探一次会干扰正常写入。
+# 可写性放在 scripts/preflight.py 里一次性确认，那里没有并发。
+
+def _health_sync() -> dict[str, Any]:
+    started = time.perf_counter()
+    error: str | None = None
+    try:
+        _get_conn().execute("SELECT 1").fetchone()
+        ok = True
+    except sqlite3.Error as exc:      # 磁盘只读、文件损坏、连接被关都会到这里
+        ok = False
+        error = str(exc)
+    try:
+        size = DB_PATH.stat().st_size
+    except OSError:
+        size = 0
+    return {
+        "ok": ok,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "size_bytes": size,
+        "path": str(DB_PATH),
+        "error": error,
+    }
+
+
+async def health() -> dict[str, Any]:
+    return await asyncio.to_thread(_health_sync)
+
+
+def _count_pending_confirms_sync() -> int:
+    """仍在等待窗口内的确认数，供指标与总览页使用。"""
+    row = _get_conn().execute(
+        "SELECT COUNT(*) FROM pending_confirms WHERE status = 'pending' AND expires_at > ?",
+        (time.time(),),
+    ).fetchone()
+    return int(row[0])
+
+
+async def count_pending_confirms() -> int:
+    return await asyncio.to_thread(_count_pending_confirms_sync)
