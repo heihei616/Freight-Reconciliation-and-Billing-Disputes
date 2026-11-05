@@ -26,6 +26,7 @@ from typing import Any
 
 # 运行数据与源码分离；可用环境变量指向其他持久化位置。
 from .utils.paths import RUNTIME_DIR, ensure_runtime_dirs
+from .utils.masking import mask_for_log
 
 ensure_runtime_dirs()
 DB_PATH = Path(os.getenv("LOGISTICS_DB_PATH", str(RUNTIME_DIR / "chat.db")))
@@ -608,8 +609,9 @@ def _log_tool_call_sync(session_id: str, user_id: str | None, step: int, name: s
             "INSERT INTO tool_calls (id, session_id, user_id, step, name, args, result, "
             "ok, error_code, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (call_id, session_id, user_id, step, name,
-             json.dumps(args, ensure_ascii=False) if args is not None else None,
-             json.dumps(result, ensure_ascii=False) if result is not None else None,
+             # 落库前统一脱敏：密钥、手机号、身份证不进数据库
+             json.dumps(mask_for_log(args), ensure_ascii=False) if args is not None else None,
+             json.dumps(mask_for_log(result), ensure_ascii=False) if result is not None else None,
              1 if ok else 0, error_code, duration_ms, _now()),
         )
         conn.commit()
@@ -876,9 +878,9 @@ def _log_step_sync(run_id: str, session_id: str, round_no: int, kind: str,
             " tool_args, duration_ms, ok, error_code, result_summary, decision, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (step_id, run_id, session_id, round_no, kind, tool_name,
-             json.dumps(tool_args or {}, ensure_ascii=False), duration_ms,
+             json.dumps(mask_for_log(tool_args or {}), ensure_ascii=False), duration_ms,
              1 if ok else 0, error_code,
-             result_summary[:500],
+             mask_for_log(result_summary[:500]),
              (decision or "")[:200] or None, _now()),
         )
         # 每写一步就更新 run 的累计值，避免结束时再扫一遍

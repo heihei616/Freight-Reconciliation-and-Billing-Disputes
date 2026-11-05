@@ -59,7 +59,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import agent, auth, db, llm
+from . import agent, auth, db, llm, ratelimit
 from .rag_service import (
     MAX_UPLOAD_BYTES,
     kb_service,
@@ -108,6 +108,9 @@ ERRORS: dict[int, str] = {
     1017: "该草稿已提交，不能重复提交",
     1018: "确认请求已失效或无权确认",
     1019: "草稿正文不能超过 1200 字",
+    1020: "提问太频繁，请稍后再试",
+    1021: "今日问答次数已用完，请明天再来",
+    1022: "当前排队人数较多，请稍后再试",
     2001: "知识库尚未就绪，请稍后再试",
     2002: "尚未配置大模型，请联系管理员",
     3001: "检索失败，请重试",
@@ -137,6 +140,8 @@ def _envelope(code: int, message: str, request_id: str) -> dict[str, Any]:
 async def lifespan(app: FastAPI):
     """启动时：建表 → 演示账号 → 默认提示词 → 准备文档 → 加载索引。"""
     await db.init_db()
+    # 限流参数从环境变量读取，默认开启；RATE_LIMIT_ENABLED=0 仅供本地调试
+    ratelimit.limiter.apply_config(ratelimit.RateLimitConfig.from_env())
     created = await auth.ensure_demo_users()
     await auth.ensure_default_prompt()
     seed_default_document(SEED_DOC)     # 首次启动把阶段 1 的文档放进 docs/
@@ -321,6 +326,15 @@ async def chat(
     if not kb_service.ready:
         raise ApiError(2001, status=503)
 
+    # 限流与配额：必须在「建会话、写消息」之前拦截，
+    # 否则被限流的请求也会在数据库里留下一堆空会话。
+    try:
+        await ratelimit.limiter.check(user_id)
+    except ratelimit.RateLimitExceeded as exc:
+        raise ApiError(1020, exc.message, status=429) from exc
+    except ratelimit.QuotaExceeded as exc:
+        raise ApiError(1021, exc.message, status=429) from exc
+
     # 会话：没有就新建，有就校验归属
     if payload.session_id:
         session = await db.get_session(payload.session_id)
@@ -362,24 +376,32 @@ async def chat(
         yield sse("status", {"stage": "retrieving", "text": "正在理解问题…"})
 
         try:
-            async for event in agent.run(
-                user_id=user_id, session_id=session_id, question=question,
-                history=history, mock=payload.mock,
-            ):
-                name = event["event"]
-                data = event["data"]
-                if name == "delta":
-                    collected.append(data.get("text", ""))
-                elif name == "sources":
-                    citations = data.get("citations", [])
-                elif name == "draft":
-                    draft_id = data.get("draft_id")
-                elif name == "done":
-                    # agent 的 done 只用于内部统计，对外的 done 由这里统一发，
-                    # 否则前端会收到两帧 done（一帧没有 message_id）。
-                    agent_stats = data
-                    continue
-                yield sse(name, data)
+            # 并发闸门：全局同时执行的 Agent 循环数有限，满了排队，超时明确报错。
+            # 放在流内而不是入口处，是因为占位的时长就是整个执行周期。
+            async with ratelimit.limiter.slot():
+                ratelimit.limiter.consume(user_id)
+                async for event in agent.run(
+                    user_id=user_id, session_id=session_id, question=question,
+                    history=history, mock=payload.mock,
+                ):
+                    name = event["event"]
+                    data = event["data"]
+                    if name == "delta":
+                        collected.append(data.get("text", ""))
+                    elif name == "sources":
+                        citations = data.get("citations", [])
+                    elif name == "draft":
+                        draft_id = data.get("draft_id")
+                    elif name == "done":
+                        # agent 的 done 只用于内部统计，对外的 done 由这里统一发，
+                        # 否则前端会收到两帧 done（一帧没有 message_id）。
+                        agent_stats = data
+                        continue
+                    yield sse(name, data)
+        except ratelimit.RateLimitExceeded as exc:
+            # 并发排队超时：此时还没开始执行，不需要落错误消息
+            yield sse("error", {"code": 1022, "message": exc.message})
+            return
         except llm.LLMError as exc:
             print(f"[模型失败] {exc}")
             await db.add_message(session_id, "assistant", "".join(collected) or "（生成失败）",

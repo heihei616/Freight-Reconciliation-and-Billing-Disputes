@@ -1,0 +1,42 @@
+# 提交前自动检查。安装一次即可：pre-commit install
+# 没装 pre-commit 也能用 python scripts/check_repo.py 达到同样的拦截效果。
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=2048]   # 大二进制文件不应进仓库
+      - id: detect-private-key # 防止误提交 PEM 私钥
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # 本地钩子：不依赖网络，跑我们自己的规范与文档校验
+  - repo: local
+    hooks:
+      - id: repo-hygiene
+        name: 仓库规范自检
+        entry: python scripts/check_repo.py
+        language: system
+        pass_filenames: false
+      - id: docs-verify
+        name: 文档与代码一致性校验
+        entry: python scripts/check_docs.py
+        language: system
+        pass_filenames: false
+      - id: offline-tests
+        name: 离线单元测试
+        entry: python -m unittest discover -s tests
+        language: system
+        pass_filenames: false

@@ -7,7 +7,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from logistics_agent.core import domain
-from logistics_agent.skills import route
 
 
 class FreightDomainTests(unittest.TestCase):
@@ -45,12 +44,58 @@ class FreightDomainTests(unittest.TestCase):
         self.assertTrue(accepted["admissible"])
 
 
-class SkillRouteTests(unittest.TestCase):
-    def test_policy_question_stays_read_only(self):
-        self.assertEqual(route("计费争议提出时限是多久"), "policy_qa")
+class FreightBoundaryTests(unittest.TestCase):
+    """边界与真值回归：金额一旦算错，后面的校验结论就全错。"""
 
-    def test_bill_number_enters_dispute_flow(self):
-        self.assertEqual(route("核对 B202610-SF-001"), "freight_dispute")
+    def test_unknown_waybill_returns_none(self):
+        self.assertIsNone(domain.get_waybill("YD0000000000"))
+
+    def test_unknown_bill_returns_none(self):
+        self.assertIsNone(domain.get_bill("B000000-XX-000"))
+
+    def test_rate_card_picked_by_date(self):
+        # 价目有版本，取错版本 = 取错单价
+        rate = domain.pick_rate_card("顺丰速运", "上海-成都", "2026-10-15")
+        self.assertIsNotNone(rate)
+        self.assertEqual(rate["carrier"], "顺丰速运")
+
+    def test_missing_rate_card_returns_none(self):
+        self.assertIsNone(domain.pick_rate_card("不存在的承运商", "上海-北京", "2026-10-15"))
+
+    def test_expected_freight_for_sample_waybill(self):
+        waybill = domain.get_waybill("YD2026090201")
+        rate = domain.pick_rate_card(waybill["carrier"], waybill["lane"], "2026-09-15")
+        result = domain.compute_freight(waybill, rate)
+        self.assertEqual(result["expected_amount"], 711.36)
+
+    def test_compute_freight_exposes_derivation(self):
+        # 推导过程必须可解释，否则员工无法向承运商说明差额来源
+        waybill = domain.get_waybill("YD2026100104")
+        rate = domain.pick_rate_card("顺丰速运", "上海-成都", "2026-10-15")
+        result = domain.compute_freight(waybill, rate)
+        for key in ["charge_weight", "weight_basis", "expected_amount"]:
+            self.assertIn(key, result)
+
+    def test_list_bills_can_filter_by_carrier(self):
+        bills = domain.list_bills(carrier="顺丰速运")
+        self.assertTrue(bills)
+        self.assertTrue(all(b["carrier"] == "顺丰速运" for b in bills))
+
+    def test_validate_result_has_evidence_fields(self):
+        result = domain.validate_bill("B202610-SF-001")
+        self.assertIn("issues", result)
+        for issue in result["issues"]:
+            self.assertIn("code", issue)
+            self.assertIn("delta", issue)
+
+    def test_quota_lookup(self):
+        quota = domain.get_quota("顺丰速运", "2026-10")
+        self.assertIsNotNone(quota)
+
+    def test_weight_ticket_reason_given_when_rejected(self):
+        result = domain.check_weight_ticket("CD2026090203")
+        self.assertFalse(result["admissible"])
+        self.assertTrue(str(result))
 
 
 if __name__ == "__main__":

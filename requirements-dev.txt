@@ -1,0 +1,7 @@
+# 开发期工具，生产部署不需要安装。
+# 安装：pip install -r requirements-dev.txt
+-r requirements.txt
+
+ruff>=0.6,<1.0          # lint + 格式化，替代 black/isort/flake8
+coverage>=7.6,<8.0      # 测试覆盖率
+pre-commit>=3.8,<4.0    # 提交前自动检查

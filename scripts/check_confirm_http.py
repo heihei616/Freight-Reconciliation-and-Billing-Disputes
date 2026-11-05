@@ -19,16 +19,23 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import time
+from urllib.parse import urlencode
 
 HOST, PORT = "127.0.0.1", 8000
 QUESTION = "帮我核上个月华东速运的争议运费"
+
+# 演示账号从环境变量读取，方便 CI 或换环境时覆盖；
+# 默认值仅用于本机演示，绝不能出现在生产配置里。
+DEMO_USER = os.getenv("DEMO_EMPLOYEE_USER", "employee")
+DEMO_PASSWORD = os.getenv("DEMO_EMPLOYEE_PASSWORD", "emp123")
 
 
 def login() -> str:
     """登录并返回 Cookie 头。"""
     conn = http.client.HTTPConnection(HOST, PORT, timeout=30)
-    body = "username=employee&password=emp123"
+    body = urlencode({"username": DEMO_USER, "password": DEMO_PASSWORD})
     conn.request("POST", "/auth/login", body=body,
                  headers={"Content-Type": "application/x-www-form-urlencoded"})
     resp = conn.getresponse()
