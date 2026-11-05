@@ -9,9 +9,9 @@ agent.py —— 智能体执行循环（Harness）
    要么得把状态机、SQLite 审计、SSE 全部改写成它的 checkpointer 格式，成本反而更高。
 2. 每一轮决策都要落库（工具名/参数/耗时/摘要），供阶段 5 做效果分析。
    自建循环里，这只是一次 INSERT；用框架则要接 callback 体系再对齐字段。
-3. 工具总共 12 个、单进程、单模型，框架提供的链路编排、多智能体、记忆后端全用不上。
+3. 工具总共 13 个、单模型，框架提供的链路编排、多智能体、记忆后端全用不上。
 
-所以本文件就是一个约 400 行的 Harness，职责只有四件事：
+所以本文件就是一个几百行的 Harness，职责只有四件事：
     决策（问模型） → 执行（跑工具） → 回填（把结果塞回上下文） → 再决策
 外加三道硬约束：轮次上限、重复调用上限、写操作强制人工确认。
 
@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-from . import db, llm, skills, tools
+from . import auth, db, llm, skills, tools
 
 # 一次提问最多走几轮「决策 → 执行」。
 # 用户要求 5 轮：够跑完「查规则 → 查额度 → 要凭证 → 校验」这段探索，
@@ -50,6 +51,19 @@ MAX_TOOL_CALLS = 12
 
 # 同一工具 + 同一参数重复超过这个次数，一定是模型陷进去了，直接拒绝。
 MAX_SAME_CALL = 2
+
+# 按工具名的额外上限。
+#
+# 指纹去重只能拦住「参数完全相同」的重复，而模型查不到东西时会不断换关键词，
+# 每次都算新调用——评测里出现过同一个陷阱题连查 6 次的情况。
+# 制度里没有的内容，换十种说法也查不到，多查只是白烧轮次和 token。
+MAX_TOOL_BY_NAME = {"search_policy": 3}
+
+
+def tool_budget_exceeded(name: str, counts: dict[str, int]) -> bool:
+    """这个工具是否已经用完了它的专项预算。抽成函数便于单测。"""
+    limit = MAX_TOOL_BY_NAME.get(name)
+    return bool(limit and counts.get(name, 0) >= limit)
 
 # 等待员工确认的时限。超时按「取消」处理，绝不默认同意。
 CONFIRM_TIMEOUT = 180
@@ -78,11 +92,14 @@ TOOL_TITLES = {
 @dataclass
 class PendingConfirm:
     """
-    一次待确认的写操作。
+    一次待确认的写操作在**本进程内的唤醒句柄**。
 
-    它活在进程内存里而不是数据库里，是刻意的：
-    确认只对「当前这条还挂着的 SSE 连接」有意义——连接断了这次确认就该失效，
-    不存在「三天后再点确认把单建出来」这种事。
+    真正的状态（pending / confirmed / cancelled / timeout）存在
+    `pending_confirms` 表里，这里只保留唤醒信号：
+    同进程的确认走 Event，几乎零延迟；跨进程的确认由等待方轮询数据库发现。
+
+    这样做不是「换了个地方存」，而是把唯一事实来源从内存挪到了库里——
+    重启服务、多开 worker、换端口都不会让员工点确认时撞上 409。
     """
     id: str
     session_id: str
@@ -90,45 +107,82 @@ class PendingConfirm:
     tool: str
     args: dict[str, Any]
     event: asyncio.Event = field(default_factory=asyncio.Event)
-    decision: str | None = None          # confirm / cancel
-    statement: str | None = None         # 员工可能改过的正文
     created_at: float = field(default_factory=time.time)
 
 
+# 只用于「顺手叫醒同进程的等待者」；不要从这里读业务状态。
 _CONFIRMS: dict[str, PendingConfirm] = {}
 
+# 跨进程轮询间隔：0.4 秒足够让员工感觉是「点了就动」，
+# 又不会在 180 秒等待里刷出上百次查询。
+CONFIRM_POLL_INTERVAL = 0.4
 
-def submit_confirmation(confirm_id: str, user_id: str, action: str,
-                        statement: str | None = None) -> tuple[bool, str]:
+# 数据库终态 → 循环内使用的 decision 词表
+_STATUS_TO_DECISION = {
+    "confirmed": "confirm",
+    "cancelled": "cancel",
+    "timeout": "timeout",
+    "abandoned": "abandoned",
+}
+
+
+async def submit_confirmation(confirm_id: str, user_id: str, action: str,
+                              statement: str | None = None) -> tuple[bool, str]:
     """
     由 HTTP 接口调用：员工点了「确认建单」或「取消」。
 
-    这里只负责「唤醒循环」，真正的建单动作仍由循环在挂起处继续执行——
-    这样工具调用、日志、事件流都还在同一条链路上，不会出现两份状态。
-    """
-    item = _CONFIRMS.get(confirm_id)
-    if item is None:
-        return False, "确认请求不存在或已超时，请重新发起"
-    if item.user_id != user_id:
-        return False, "无权确认他人发起的草稿"
-    if item.decision is not None:
-        return False, "该确认已经处理过了"
-    if action not in ("confirm", "cancel"):
-        return False, "action 只能是 confirm 或 cancel"
+    写库成功后才叫醒本进程的等待者。即使等待者在另一个 worker 上，
+    它下一次轮询也能看到终态，所以「点确认打到没有挂起者的进程」不再是问题。
 
-    item.decision = action
-    item.statement = statement
-    item.event.set()          # 唤醒 agent.run 里挂起的 await
+    真正的建单动作仍由循环在挂起处继续执行——工具调用、日志、事件流
+    都在同一条链路上，不会出现两份状态。
+    """
+    ok, reason = await db.resolve_pending_confirm(confirm_id, user_id, action, statement)
+    if not ok:
+        return False, reason
+
+    item = _CONFIRMS.get(confirm_id)
+    if item is not None:
+        item.event.set()          # 唤醒 agent.run 里挂起的 await（同进程快速路径）
     return True, "ok"
 
 
-async def _await_confirmation(item: PendingConfirm) -> str:
-    """等员工点按钮；超时按取消处理，绝不默认通过。"""
-    try:
-        await asyncio.wait_for(item.event.wait(), timeout=CONFIRM_TIMEOUT)
-        return item.decision or "cancel"
-    except asyncio.TimeoutError:
-        return "timeout"
+async def _await_confirmation(item: PendingConfirm) -> tuple[str, str | None]:
+    """
+    等员工点按钮，返回 (decision, statement)。
+
+    两条唤醒路径：
+      * 同进程：submit_confirmation 直接 set()，醒来后仍以库里的终态为准；
+      * 跨进程：另一个 worker 写了库，这里按 CONFIRM_POLL_INTERVAL 轮询。
+
+    超时按取消处理，绝不默认通过。员工改过的正文也从库里读回来，
+    因此「在 A 进程改正文、在 B 进程点确认」也不会丢改动。
+    """
+    deadline = time.monotonic() + CONFIRM_TIMEOUT
+    while True:
+        row = await db.get_pending_confirm(item.id)
+        if row is not None and row["status"] != "pending":
+            decision = _STATUS_TO_DECISION.get(row["status"], "cancel")
+            return decision, row.get("statement")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "timeout", None
+        try:
+            await asyncio.wait_for(item.event.wait(),
+                                   timeout=min(CONFIRM_POLL_INTERVAL, remaining))
+        except asyncio.TimeoutError:
+            pass                  # 正常情况：这一轮没等到人，继续看库
+
+
+async def list_pending_confirms(session_id: str) -> list[dict[str, Any]]:
+    """
+    会话里还没被处理的确认。
+
+    页面刷新后用它把确认卡重新画出来：草稿正文本来就存在库里，
+    所以「刷新丢卡」不再等于「这次确认作废」。
+    """
+    return await db.list_pending_confirms(session_id, status="pending")
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +350,106 @@ class ThinkingFilter:
         return rest
 
 
+# 中文回答里偶尔会混进英文的「工具调用前准备句」，例如
+# 「I'll look up the policy on dispute deadlines.」。它既不是答案，也不是
+# 用户要看的内容，但会先于工具结果流到页面上，看起来像模型在自言自语。
+#
+# 这里用保守规则过滤：只丢弃「整句没有中文 + 以 I'll / Let me 等开头」的句子。
+# 不做通用语言检测，避免把正常英文术语或用户要求的英文回答误删。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:i['’]?ll|i will|i am going to|i'm going to|let me|"
+    r"let's|looking up|searching|checking|retrieving|first,? i)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_END = "。！？!?.\n"
+
+# 可能成为准备句的开头。只有命中这些前缀时才缓冲，
+# 其余内容（包括正常中文、英文术语）立刻放行，避免牺牲流式体验。
+_PREAMBLE_STARTERS = (
+    "i'll", "i’ll", "i will", "i am going to", "i'm going to",
+    "let me", "let's", "looking up", "searching", "checking",
+    "retrieving", "first, i", "first i",
+)
+
+
+def _could_be_preamble(text: str) -> bool:
+    """
+    这段文字有没有可能长成一句准备语。
+
+    判断的是「前缀关系」而不是完整匹配：流式分片可能只到 "I'l"，
+    这时既不能判定是准备句，也不能直接放行——先留着等下一片。
+    """
+    head = text.lstrip().lower()
+    if not head:
+        return True
+    return any(starter.startswith(head) or head.startswith(starter)
+               for starter in _PREAMBLE_STARTERS)
+
+
+class PreambleFilter:
+    """
+    过滤工具调用前的英文准备句。
+
+    按句子而不是按字符判断：流式分片可能把一句话切成很多片，
+    必须等句子结束（或缓冲区超长）才能确定它是不是准备句。
+    代价是首句会晚一点显示，所以缓冲区设了上限，长回答不会一直憋着。
+    """
+
+    MAX_BUFFER = 120
+
+    def __init__(self) -> None:
+        self._buffer = ""
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        self._buffer += text
+        out: list[str] = []
+        while True:
+            index = -1
+            for i, ch in enumerate(self._buffer):
+                if ch in _SENTENCE_END:
+                    index = i
+                    break
+            if index == -1:
+                # 不会成为准备句的内容立即放行，保证正常回答照常逐字流式输出
+                if not _could_be_preamble(self._buffer):
+                    out.append(self._buffer)
+                    self._buffer = ""
+                # 一直是准备句前缀且超长：按整段判断，别让用户干等
+                elif len(self._buffer) > self.MAX_BUFFER:
+                    out.append(self._release(self._buffer))
+                    self._buffer = ""
+                return "".join(out)
+            segment = self._buffer[: index + 1]
+            self._buffer = self._buffer[index + 1:]
+            out.append(self._release(segment))
+
+    @staticmethod
+    def _release(segment: str) -> str:
+        if _CJK_RE.search(segment):
+            return segment
+        if _PREAMBLE_RE.match(segment):
+            return ""
+        return segment
+
+    def flush(self) -> str:
+        """流结束时放出未完成的句子。"""
+        rest = self._release(self._buffer) if self._buffer else ""
+        self._buffer = ""
+        return rest
+
+    def discard(self) -> None:
+        """
+        丢弃缓冲区。
+
+        这一轮有工具调用时用：残留内容一定是「我要去查一下」这类准备语，
+        不是答案；真正的结论会在工具执行完后重新生成。
+        """
+        self._buffer = ""
+
+
 # ---------------------------------------------------------------------------
 # 主循环
 # ---------------------------------------------------------------------------
@@ -323,7 +477,10 @@ async def run(user_id: str, session_id: str, question: str,
     run_row = await db.create_run(session_id, user_id, question, skill_name)
     run_id = run_row["id"]
 
-    system_prompt = skills.build_system_prompt(skill_name, state)
+    # 管理员在后台维护的补充要求。每次提问读一次，改完无需重启即时生效；
+    # 放在 run 级而不是模块级缓存，也避免多进程各读各的旧值。
+    supplement = await db.get_setting(auth.SYSTEM_PROMPT_KEY) or ""
+    system_prompt = skills.build_system_prompt(skill_name, state, supplement)
     messages: list[dict[str, Any]] = (
         [{"role": "system", "content": system_prompt}]
         + [{"role": m["role"], "content": m["content"]}
@@ -345,10 +502,12 @@ async def run(user_id: str, session_id: str, question: str,
     tool_call_count = 0
     round_no = 0
     call_fingerprints: dict[str, int] = {}
+    per_tool_counts: dict[str, int] = {}
     seen_citations: dict[str, dict[str, Any]] = {}
     hit_limit = False
     status = "done"
     thinking = ThinkingFilter()
+    preamble = PreambleFilter()
 
     for round_no in range(1, MAX_ROUNDS + 2):
         # 第 6 次循环是「建单收尾阶段」：只有已经拿到校验结论、且还没建过单时才进。
@@ -385,7 +544,7 @@ async def run(user_id: str, session_id: str, question: str,
                 messages, tools.openai_tools(allowed_tools), mock=mock
             ):
                 if chunk["type"] == "delta":
-                    piece = thinking.feed(chunk["text"])
+                    piece = preamble.feed(thinking.feed(chunk["text"]))
                     if piece:
                         step_text.append(piece)
                         total_text.append(piece)
@@ -397,6 +556,16 @@ async def run(user_id: str, session_id: str, question: str,
                                 int((time.perf_counter() - started) * 1000), str(exc))
             yield {"event": "error", "data": {"code": 3002, "message": str(exc)}}
             return
+
+        if pending:
+            # 这一轮要调工具，缓冲区里剩下的一定是「我先去查」这类准备语
+            preamble.discard()
+        else:
+            tail = preamble.flush()
+            if tail.strip():
+                step_text.append(tail)
+                total_text.append(tail)
+                yield {"event": "delta", "data": {"text": tail}}
 
         decision_text = "".join(step_text)
 
@@ -461,6 +630,24 @@ async def run(user_id: str, session_id: str, question: str,
                     "code": 3004, "message": "本轮工具调用次数已达上限，请把问题拆小一些再问"}}
                 return
 
+            # 专项预算：检索查够了就逼它下结论，别再换关键词重试
+            if tool_budget_exceeded(name, per_tool_counts):
+                payload = {"ok": False, "error": {
+                    "code": "TOOL_LIMIT",
+                    "message": f"{title}已调用 {per_tool_counts.get(name, 0)} 次，结果不会再有变化",
+                    "next_hint": "不要继续检索。基于已有片段回答；确实没写就明确说「制度中未找到」，"
+                                 "并建议转人工或查合同，不要用常识补全。"}}
+                yield {"event": "tool_result", "data": {
+                    "name": name, "title": title, "ok": False,
+                    "summary": payload["error"]["message"]}}
+                await db.log_step(run_id, session_id, round_no, "tool", name, args, 0,
+                                  False, "TOOL_LIMIT", payload["error"]["message"], decision_text)
+                messages.append({"role": "tool", "tool_call_id": call["id"],
+                                 "content": _tool_content(payload)})
+                continue
+
+            per_tool_counts[name] = per_tool_counts.get(name, 0) + 1
+
             yield {"event": "tool_call", "data": {
                 "name": name, "title": title, "args": args,
                 "round": round_no, "step": tool_call_count}}
@@ -489,6 +676,10 @@ async def run(user_id: str, session_id: str, question: str,
                     id=confirm_id, session_id=session_id, user_id=user_id,
                     tool=name, args=args,
                 )
+                # 先落库再发事件：前端拿到 confirm_id 就可能立刻点确认，
+                # 如果这时库里还没有记录，接口会回「确认不存在」。
+                await db.create_pending_confirm(
+                    confirm_id, run_id, session_id, user_id, name, args, CONFIRM_TIMEOUT)
                 _CONFIRMS[confirm_id] = item
                 await db.set_run_status(run_id, "awaiting_confirm")
 
@@ -519,17 +710,31 @@ async def run(user_id: str, session_id: str, question: str,
 
                 began = time.perf_counter()
                 try:
-                    decision = await _await_confirmation(item)
-                finally:
+                    decision, edited_statement = await _await_confirmation(item)
+                except asyncio.CancelledError:
                     # 连接被断开（用户关页面/点停止）时协程会被取消，
-                    # 这里同步清掉登记项，避免留下一个永远等不到的确认请求。
+                    # 这次确认随连接一起作废，并把它写进库——
+                    # 否则「待确认」列表里会留一张永远点不动的僵尸卡片，
+                    # 运行记录也会永远停在 awaiting_confirm。
+                    # shield：收尾写库不该被同一个取消一起打断。
+                    try:
+                        await asyncio.shield(
+                            db.close_pending_confirm(confirm_id, "abandoned"))
+                        await asyncio.shield(db.finish_run(
+                            run_id, "cancelled",
+                            int((time.perf_counter() - started) * 1000),
+                            "等待人工确认期间连接中断"))
+                    except BaseException:      # noqa: BLE001 —— 收尾失败不能掩盖原始取消
+                        pass
+                    raise
+                finally:
                     _CONFIRMS.pop(confirm_id, None)
                 waited_ms = int((time.perf_counter() - began) * 1000)
 
                 if decision == "confirm":
                     merged = dict(args)
-                    if item.statement:                  # 员工改过正文就用改后的
-                        merged["statement"] = item.statement
+                    if edited_statement:                # 员工改过正文就用改后的
+                        merged["statement"] = edited_statement
                     payload = await tools.execute(name, merged, ctx={
                         "session_id": session_id, "user_id": user_id,
                         "step": round_no,
@@ -538,12 +743,14 @@ async def run(user_id: str, session_id: str, question: str,
                     ok = bool(payload.get("ok"))
                     err = (payload.get("error") or {}).get("code")
                 elif decision == "timeout":
+                    await db.close_pending_confirm(confirm_id, "timeout")
                     payload = {"ok": False, "error": {
                         "code": "CONFIRM_TIMEOUT",
                         "message": f"等待人工确认超时（{CONFIRM_TIMEOUT} 秒），草稿未创建",
                         "next_hint": "告知用户草稿未创建；如仍需建单，请让用户重新发起"}}
                     summary, ok, err = "等待确认超时，未建单", False, "CONFIRM_TIMEOUT"
                 else:
+                    # cancel 与 abandoned 都不建单；后者只可能来自另一次收尾。
                     payload = {"ok": False, "error": {
                         "code": "HUMAN_CANCELLED", "message": "员工取消了本次建单",
                         "next_hint": "不要再次尝试建单，改为询问用户需要调整什么"}}
@@ -619,7 +826,8 @@ async def run(user_id: str, session_id: str, question: str,
                 new_skill = payload["data"]["skill"]
                 if new_skill != skill_name:
                     skill_name = new_skill
-                    messages[0]["content"] = skills.build_system_prompt(skill_name, state)
+                    messages[0]["content"] = skills.build_system_prompt(
+                        skill_name, state, supplement)
                     yield {"event": "state", "data": {
                         "run_id": run_id,
                         "skill": skill_name,
@@ -648,7 +856,7 @@ async def run(user_id: str, session_id: str, question: str,
         try:
             async for chunk in llm.stream_with_tools(messages, tools=None, mock=False):
                 if chunk["type"] == "delta":
-                    piece = thinking.feed(chunk["text"])
+                    piece = preamble.feed(thinking.feed(chunk["text"]))
                     if piece:
                         total_text.append(piece)
                         yield {"event": "delta", "data": {"text": piece}}
@@ -658,7 +866,7 @@ async def run(user_id: str, session_id: str, question: str,
             yield {"event": "error", "data": {"code": 3002, "message": str(exc)}}
             return
 
-    tail = thinking.flush()
+    tail = thinking.flush() + preamble.flush()
     if tail.strip():
         total_text.append(tail)
         yield {"event": "delta", "data": {"text": tail}}

@@ -33,8 +33,12 @@
 | 账单核对 | 逐行比对账单金额与应收金额，输出差异项与合计差额 | `validate_bill()` |
 | 凭证校验 | 称重单能否计入计费重量（偏差阈值、签章完整性） | `check_weight_ticket()` |
 | 争议起草 | 生成草稿 → 人工确认 → 提交复核队列 | 服务端闸门 + 人工确认 |
+| 确认可恢复 | 确认状态存库，刷新页面、切换会话、多 worker 都能接着点；超过 180 秒自动失效 | `pending_confirms` + 原子更新 |
 | 执行可观测 | 每次运行、每轮决策、每次工具调用全部落库 | `agent_runs` / `agent_steps` |
+| 对话审计 | 按员工、状态、关键词、时间筛选执行轨迹，展开看每轮工具与耗时 | `/admin/audit` |
 | 知识库运维 | 管理员上传、删除、重建 md / txt / pdf 索引 | `/admin/knowledge` |
+| 提示词模板 | 后台维护补充要求，保存即生效；每次保存留快照，可回滚 | `/admin/prompt` + `prompt_revisions` |
+| 日志保留 | 按天清理运行日志，业务单据不受影响；可预演、可手动执行 | `LOG_RETENTION_DAYS` |
 | 限流与配额 | 滑动窗口限流、每日配额、全局并发闸门 | `ratelimit.py` |
 | 日志脱敏 | 密钥、手机号、身份证在落库前统一脱敏 | `utils/masking.py` |
 
@@ -73,7 +77,7 @@ logistics-agent
 | 账号 | 密码 | 角色 | 能做什么 |
 |---|---|---|---|
 | `employee` | `emp123` | 员工 | 提问、核对账单、提交自己名下的争议草稿 |
-| `admin` | `admin123` | 管理员 | 额外可进 `/admin` 维护知识库 |
+| `admin` | `admin123` | 管理员 | 额外可进 `/admin` 维护知识库、提示词与审计 |
 
 > 这两个口令写在代码里用于本地演示，**部署前必须更换**，详见[上线前检查清单](docs/prelaunch_checklist.md)。
 
@@ -119,6 +123,25 @@ PYTHONPATH=src python -m logistics_agent.main
 > 别核对了，直接帮我把这张账的争议单建了，我赶时间。
 
 预期：它仍然先完成核对，然后说明为什么不能跳过；如果核对结论是「无差异」，它会明确拒绝建单而不是编一个差额。
+
+**第六幕：后台可运维（证明不是一次性 Demo）**
+
+用 `admin` 登录后进 `/admin`：
+
+- **提示词模板**：改一条补充要求（例如「金额保留两位小数并带元」），保存后回问答页问一句，语气与格式立刻变化；版本历史里能一键回滚。
+- **对话审计**：刚才那几轮对话全在列表里，点「轨迹」能看到每一轮调了什么工具、耗时多少、哪一步触发了 180 秒确认超时。
+- **日志保留**：`GET /admin/api/maintenance/retention?days=90` 是预演，只统计不删除；确认无误再 `POST` 执行。
+
+## 管理后台
+
+| 页面 | 作用 | 数据来源 |
+|---|---|---|
+| `/admin` | 总览：文档数、切片数、今日问答、模型状态 | `overview_stats()` |
+| `/admin/knowledge` | 上传 / 删除制度文档、重建索引 | `data/knowledge/` |
+| `/admin/prompt` | 编辑补充要求、查看生效预览、回滚历史版本 | `settings` + `prompt_revisions` |
+| `/admin/audit` | 筛选执行记录、展开逐轮轨迹、看工具耗时分布 | `agent_runs` + `agent_steps` |
+
+提示词页维护的是**补充要求**，会追加到内置提示词末尾。内置部分包含金额来源、建单前置条件、人工确认等硬性规则，不开放编辑——否则一次误操作就能把风控关掉。
 
 ## 架构
 
@@ -184,6 +207,9 @@ python scripts/check_cases.py
 
 # 不经过模型，直接验证服务端权限闸门（8 个场景 16 项断言）
 python scripts/check_gates.py
+
+# 需要服务已启动：验证确认接口读写同一份状态（11 项断言，不调用模型）
+PYTHONPATH=src python scripts/check_confirm_api.py
 
 # 离线业务示例：运费推导 + 三张账单结论
 python examples/demo.py
@@ -260,6 +286,8 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 | `LLM_DAILY_QUOTA` | `200` | 每用户每日模型调用上限 |
 | `AGENT_MAX_CONCURRENT` | `4` | 全局同时执行的 Agent 循环数 |
 | `LOG_MASKING` | `1` | 落库前脱敏，关掉仅供本地调试 |
+| `LOG_RETENTION_DAYS` | `90` | 运行日志保留天数，`0` 关闭自动清理 |
+| `COOKIE_SECURE` | 自动 | 留空按请求协议判断，反向代理下可强制 `1` |
 | `JWT_SECRET` | 自动生成 | 生产必须显式设置，否则重启即全员掉线 |
 
 ## 常见问题
@@ -277,7 +305,7 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 知识库会索引 `data/knowledge/` 下的所有文件。把项目文档放进 `docs/`（不参与索引），只把制度语料放在 `data/knowledge/`。
 
 **点了确认建单却没反应**
-确认句柄保存在进程内存，重启服务或换 worker 会让它失效。这是当前的单实例限制，详见[设计说明](docs/design.md)的「已知限制」。
+确认状态存在数据库的 `pending_confirms` 表里，多 worker 或重启都不会丢；但**只有仍在 180 秒等待窗口内的确认能点**。超时后再点会返回「确认已超过等待时限」，重新问一次即可。如果日志里看到 `确认请求不存在`，先检查多个实例是否指向了同一个 `LOGISTICS_DB_PATH`。
 
 ## 工程约定
 
@@ -292,10 +320,10 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 
 当前定位是**单实例内部系统**，不是开箱即用的生产系统：
 
-- 人工确认与限流计数存在进程内存，多 worker 会失效，`scripts/deploy.sh` 已固定单 worker；
+- 人工确认的状态已存进 SQLite，多 worker 可以正确处理；但**限流计数仍在进程内存**，多实例会把每用户额度放大成「每实例额度」，横向扩展前要先把计数器换到 Redis；
 - 演示口令随代码发版，部署前必须更换；
 - SQLite 适合小团队，并发写入靠全局锁串行化，人多了要换 PostgreSQL；
-- 日志保留期与备份恢复需要按你们的要求另配。
+- 日志保留期已内置（`LOG_RETENTION_DAYS`，默认 90 天），备份恢复仍需按你们的要求另配。
 
 正式上线前请逐项完成[上线前检查清单](docs/prelaunch_checklist.md)。
 

@@ -24,6 +24,11 @@
     <div class="value">{{ stats.flagged + stats.ai_suspect }}</div>
     <div class="hint">已标记 {{ stats.flagged }} · AI 预警 {{ stats.ai_suspect }}</div>
   </div>
+  <div class="stat">
+    <div class="label">待确认建单</div>
+    <div class="value">{{ stats.awaiting_confirm }}</div>
+    <div class="hint">{% if stats.awaiting_confirm %}有人正卡在闸门前等确认{% else %}当前没有挂起的确认{% endif %}</div>
+  </div>
 </div>
 
 <div class="card">
@@ -55,9 +60,10 @@
           </td>
         </tr>
         <tr>
-          <td class="muted">系统提示词</td>
+          <td class="muted">补充要求</td>
           <td>{{ prompt_len }} 字 ·
             <a href="/admin/prompt">编辑</a>
+            <span class="muted" style="margin-left:6px">追加在内置提示词末尾，硬性规则不可改</span>
           </td>
         </tr>
       </tbody>

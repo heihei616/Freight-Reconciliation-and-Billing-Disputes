@@ -642,35 +642,9 @@ function addAssistantMessage() {
   const confirmCards = {};
 
   function renderConfirm(data) {
-    const issues = (data.issues || []).map(x =>
-      `<li>第${x.line_no}行 ${esc(x.explain || '')}（应 ${x.expected} / 收 ${x.charged} / 差 ${x.delta}）</li>`
-    ).join('');
-
-    const card = document.createElement('div');
-    card.className = 'draft confirm';
-    card.innerHTML = `
-      <h4>建单前确认 · 系统已暂停，等你核对</h4>
-      <div class="row">
-        <span>账单 <b>${esc(data.bill_no || '-')}</b></span>
-        <span>类型 <b>${esc(data.dispute_type || '-')}</b></span>
-        <span>争议金额 <b>¥${Number(data.amount || 0).toFixed(2)}</b></span>
-      </div>
-      ${issues ? `<ul class="issues">${issues}</ul>` : ''}
-      <div class="stmt confirm-stmt"></div>
-      <div class="actions">
-        <button class="btn primary" type="button" disabled>确认建单</button>
-        <button class="btn" type="button" disabled>取消</button>
-        <span class="tip">${data.timeout_sec || 180} 秒内不确认会自动取消</span>
-      </div>`;
-
-    const [okBtn, cancelBtn] = card.querySelectorAll('button');
-    okBtn.onclick = () => submitConfirm(data.confirm_id, 'confirm', card);
-    cancelBtn.onclick = () => submitConfirm(data.confirm_id, 'cancel', card);
-
-    confirmCards[data.confirm_id] = { card, okBtn, cancelBtn,
-      stmt: card.querySelector('.confirm-stmt') };
-
-    bubble.parentElement.appendChild(card);
+    const entry = buildConfirmCard(data);
+    confirmCards[data.confirm_id] = entry;
+    bubble.parentElement.appendChild(entry.card);
     scrollIfNearBottom();
   }
 
@@ -689,8 +663,9 @@ function addAssistantMessage() {
     if (!entry) return;
     entry.okBtn.disabled = false;
     entry.cancelBtn.disabled = false;
+    bindStatementEdit(entry.stmt);
     entry.card.querySelector('.tip').textContent =
-      '确认后才会真正建单；AI 没有绕过这一步的能力';
+      '正文可直接修改；确认后才会真正建单，AI 没有绕过这一步的能力';
   }
 
   function closeConfirm(confirmId, decision, waitedMs) {
@@ -808,12 +783,23 @@ function addPlainAssistant(text, isError) {
  */
 async function submitConfirm(confirmId, action, card) {
   const buttons = card.querySelectorAll('button');
+  // 员工可能改过正文：改后的版本随确认一起提交，服务端会以它为准
+  const stmtEl = card.querySelector('.confirm-stmt');
+  const statement = stmtEl ? stmtEl.textContent.trim() : '';
+  if (action === 'confirm' && statement.length > 1200) {
+    toast('草稿正文超过 1200 字，请精简后再确认');
+    return;
+  }
   buttons.forEach(b => { b.disabled = true; });
   try {
     const res = await fetch('/api/agent/confirm', {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ confirm_id: confirmId, action }),
+      body: JSON.stringify({
+        confirm_id: confirmId,
+        action,
+        statement: action === 'confirm' ? statement : null,
+      }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -828,6 +814,60 @@ async function submitConfirm(confirmId, action, card) {
     toast(`网络异常：${e.message}`);
     buttons.forEach(b => { b.disabled = false; });
   }
+}
+
+/**
+ * 造一张「建单前确认」卡片。
+ * 流式到达时用它、刷新后从 /api/agent/confirm/pending 重建也用它——
+ * 两处共用一份 DOM，按钮行为和正文内容才不会走偏。
+ */
+function buildConfirmCard(data) {
+  const issues = (data.issues || []).map(x =>
+    `<li>第${esc(x.line_no)}行 ${esc(x.explain || '')}（应 ${esc(x.expected)} / 收 ${esc(x.charged)} / 差 ${esc(x.delta)}）</li>`
+  ).join('');
+  const waitSec = data.remain_sec != null ? data.remain_sec : (data.timeout_sec || 180);
+
+  const card = document.createElement('div');
+  card.className = 'draft confirm';
+  card.innerHTML = `
+    <h4>建单前确认 · 系统已暂停，等你核对</h4>
+    <div class="row">
+      <span>账单 <b>${esc(data.bill_no || '-')}</b></span>
+      <span>类型 <b>${esc(data.dispute_type || '-')}</b></span>
+      <span>争议金额 <b>¥${Number(data.amount || 0).toFixed(2)}</b></span>
+    </div>
+    ${issues ? `<ul class="issues">${issues}</ul>` : ''}
+    <div class="stmt confirm-stmt"></div>
+    <div class="actions">
+      <button class="btn primary" type="button" disabled>确认建单</button>
+      <button class="btn" type="button" disabled>取消</button>
+      <span class="tip">${waitSec} 秒内不确认会自动取消</span>
+    </div>`;
+
+  const stmt = card.querySelector('.confirm-stmt');
+  stmt.textContent = data.statement || '';
+
+  const [okBtn, cancelBtn] = card.querySelectorAll('button');
+  okBtn.onclick = () => submitConfirm(data.confirm_id, 'confirm', card);
+  cancelBtn.onclick = () => submitConfirm(data.confirm_id, 'cancel', card);
+
+  // 重建的卡片正文已经完整（库里存着），没有流可等，直接放开编辑与按钮
+  if (data.statement) {
+    okBtn.disabled = false;
+    cancelBtn.disabled = false;
+    bindStatementEdit(stmt);
+  }
+
+  return { card, okBtn, cancelBtn, stmt };
+}
+
+/** 正文可改：员工发现措辞不妥，改完再点确认，采用的就是改后的版本 */
+function bindStatementEdit(stmt) {
+  if (!stmt || stmt.dataset.editable) return;
+  stmt.dataset.editable = '1';
+  stmt.contentEditable = 'true';
+  stmt.spellcheck = false;
+  stmt.title = '可以直接修改；改动会随确认一起提交';
 }
 
 /**
@@ -864,25 +904,74 @@ function buildDraftCard(data) {
   return card;
 }
 
-/** 拉取我名下未提交的草稿，重建卡片（刷新页面后仍能找到提交入口） */
-async function loadPendingDrafts() {
-  if (!els.pendingDrafts) return;
+/** 我名下未提交的草稿 */
+async function fetchPendingDrafts() {
   try {
     const res = await fetch('/api/disputes');
-    if (handleUnauthorized(res)) return;
-    if (!res.ok) return;
+    if (handleUnauthorized(res)) return [];
+    if (!res.ok) return [];
     const data = await res.json();
-    const drafts = (data.drafts || []).filter(d => d.status === 'draft');
-    els.pendingDrafts.innerHTML = '';
-    if (!drafts.length) { els.pendingDrafts.style.display = 'none'; return; }
+    return (data.drafts || []).filter(d => d.status === 'draft');
+  } catch { return []; }
+}
 
+/**
+ * 当前会话里还没被处理的建单确认。
+ * 服务端只返回仍在等待时限内的记录，过期的不会出现在这里。
+ */
+async function fetchPendingConfirms() {
+  if (!state.sessionId) return [];
+  try {
+    const res = await fetch(
+      `/api/agent/confirm/pending?session_id=${encodeURIComponent(state.sessionId)}`);
+    if (handleUnauthorized(res)) return [];
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.confirms || [];
+  } catch { return []; }
+}
+
+/**
+ * 拉取「还需要人动手」的东西：挂起的建单确认 + 未提交的草稿。
+ *
+ * 刷新页面后两者都能从服务端重建。确认卡以前只活在 SSE 连接里，
+ * 刷新即作废；现在状态和正文都落库，重建出来的卡片仍然可点。
+ *
+ * 页面初始化和 openSession 都会调它，两次请求可能并发返回。
+ * 用序号只让最后一次渲染生效，否则先返回的那次会把后返回的覆盖掉，
+ * 或者两张卡各追加一遍。
+ */
+let pendingSeq = 0;
+
+async function loadPendingWork() {
+  if (!els.pendingDrafts) return;
+  const seq = ++pendingSeq;
+  const [drafts, confirms] = await Promise.all([fetchPendingDrafts(), fetchPendingConfirms()]);
+  if (seq !== pendingSeq) return;        // 已有更新的一次在跑，这次结果作废
+
+  els.pendingDrafts.innerHTML = '';
+  let shown = 0;
+
+  if (confirms.length) {
+    const title = document.createElement('div');
+    title.className = 'pending-title';
+    title.textContent =
+      `有 ${confirms.length} 个建单确认正在等你核对（AI 没有建单权限，必须你点）`;
+    els.pendingDrafts.appendChild(title);
+    confirms.forEach(c => els.pendingDrafts.appendChild(buildConfirmCard(c).card));
+    shown += confirms.length;
+  }
+
+  if (drafts.length) {
     const title = document.createElement('div');
     title.className = 'pending-title';
     title.textContent = `有 ${drafts.length} 张争议草稿等你确认提交（AI 没有提交权限，必须你点）`;
     els.pendingDrafts.appendChild(title);
     drafts.forEach(d => els.pendingDrafts.appendChild(buildDraftCard(d)));
-    els.pendingDrafts.style.display = 'block';
-  } catch { /* 拉不到就不显示，不影响聊天 */ }
+    shown += drafts.length;
+  }
+
+  els.pendingDrafts.style.display = shown ? 'block' : 'none';
 }
 
 /**
@@ -912,7 +1001,7 @@ async function submitDraft(draftId, card, btn) {
       `<span class="tip">已提交，争议单已进入结算复核队列（${esc(draftId)}）</span>`;
     // 提交成功的卡从「待确认」栏撤掉，否则刷新前会一直挂在顶部
     if (els.pendingDrafts && els.pendingDrafts.contains(card)) {
-      loadPendingDrafts();
+      loadPendingWork();
     }
   } catch (e) {
     toast(`网络异常：${e.message}`);
@@ -1091,6 +1180,8 @@ async function openSession(sessionId) {
       }
     });
     loadSessions();
+    // 切换会话时同步刷新「待办」：另一个会话里可能正挂着一条建单确认
+    loadPendingWork();
   } catch (e) {
     toast('加载历史失败：' + e.message);
   }
@@ -1172,7 +1263,7 @@ els.input.addEventListener('input', () => {
 
 // 首屏：身份 + 健康状态 + 会话列表；有上次会话就直接恢复
 (async function init() {
-  loadWhoami(); loadHealth(); loadSessions(); loadPendingDrafts();
+  loadWhoami(); loadHealth(); loadSessions(); loadPendingWork();
   if (state.sessionId) {
     await openSession(state.sessionId);
   }

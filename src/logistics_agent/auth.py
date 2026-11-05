@@ -43,12 +43,28 @@ COOKIE_NAME = "access_token"
 ROLE_EMPLOYEE = "employee"
 ROLE_ADMIN = "admin"
 
-# 默认系统提示词。管理员在后台改过之后，以数据库里的为准。
+# 后台可编辑的「补充要求」（存 settings 表，键名沿用 system_prompt）。
+#
+# 注意它只是补充，不是整段系统提示词：硬性规则与流程约束由
+# skills.build_system_prompt 生成，这段文本会被追加到提示词末尾，
+# 并在段首声明「与硬性规则冲突时以硬性规则为准」。
+#
+# 这样设计的原因：如果把整段提示词都交给后台编辑，管理员一次误操作
+# 就可能把「不得编造金额」「建单必须人工确认」一起删掉，而这些是
+# 系统性约束，不应该成为可配置项。
 DEFAULT_SYSTEM_PROMPT = (
-    "你是公司物流费对账与计费争议助手，只根据提供的制度条文回答，"
-    "不确定时明确说'制度中未找到'，回答末尾附引用来源，不得编造报销标准。"
+    "- 称呼统一用「你」，不用「您」。\n"
+    "- 金额保留两位小数并带「元」，例如 540.80 元。\n"
+    "- 提到账期时，先说明是哪个月的账，再给结论。"
 )
 SYSTEM_PROMPT_KEY = "system_prompt"
+
+# 早期版本存的是「整段提示词」的一句话版本。升级后如果发现库里还是这句，
+# 说明管理员没改过，直接替换成新的补充要求；改过的不动，避免覆盖用户配置。
+_LEGACY_SYSTEM_PROMPTS = {
+    "你是公司物流费对账与计费争议助手，只根据提供的制度条文回答，"
+    "不确定时明确说'制度中未找到'，回答末尾附引用来源，不得编造报销标准。",
+}
 
 # PBKDF2 迭代次数。20 万次在普通笔记本上约 100ms，足够拖慢离线爆破。
 _PBKDF2_ROUNDS = 200_000
@@ -207,7 +223,33 @@ async def ensure_demo_users() -> list[str]:
     return created
 
 
+async def insecure_demo_accounts() -> list[str]:
+    """
+    检查还有哪些账号在用代码里写死的演示口令。
+
+    只用于启动告警，不阻断启动：课程验收时用的就是这两个账号，
+    直接拒绝启动会让「双击就能演示」这件事失效。生产环境靠告警 + 清单约束。
+    """
+    risky = []
+    for username, password, _, _ in _DEMO_USERS:
+        user = await db.get_user_by_username(username)
+        if user and user.get("is_active") and verify_password(password, user["password_hash"]):
+            risky.append(username)
+    return risky
+
+
 async def ensure_default_prompt() -> None:
-    """系统提示词没存过就写一份默认的，之后以数据库为准。"""
-    if await db.get_setting(SYSTEM_PROMPT_KEY) is None:
+    """
+    补充要求没存过就写一份默认的，之后以数据库为准。
+
+    两种情况会写：库里没有；库里还是早期那句「整段提示词」的默认值。
+    后者说明管理员从未动过，替换成新口径不会覆盖任何人工配置。
+    """
+    current = await db.get_setting(SYSTEM_PROMPT_KEY)
+    if current is None:
         await db.set_setting(SYSTEM_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT, updated_by="system")
+        await db.save_prompt_revision(DEFAULT_SYSTEM_PROMPT, action="system", operator="system")
+        return
+    if current in _LEGACY_SYSTEM_PROMPTS:
+        await db.set_setting(SYSTEM_PROMPT_KEY, DEFAULT_SYSTEM_PROMPT, updated_by="system")
+        await db.save_prompt_revision(DEFAULT_SYSTEM_PROMPT, action="migrate", operator="system")

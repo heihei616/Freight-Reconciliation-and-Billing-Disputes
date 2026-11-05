@@ -19,6 +19,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -180,6 +181,42 @@ CREATE TABLE IF NOT EXISTS agent_steps (
 
 CREATE INDEX IF NOT EXISTS idx_step_run ON agent_steps(run_id, round);
 CREATE INDEX IF NOT EXISTS idx_step_tool ON agent_steps(tool_name, created_at);
+
+-- 提示词版本：管理员每次保存后台补充指令都留一份快照。
+-- 只存「改完之后」的全文，不存 diff —— 内容只有几百字，存全文更省事，
+-- 恢复时直接把旧全文写回即可，不用重放一堆补丁。
+CREATE TABLE IF NOT EXISTS prompt_revisions (
+  id         TEXT PRIMARY KEY,
+  content    TEXT NOT NULL,             -- 本次保存后的完整内容（可为空串，表示清空）
+  action     TEXT NOT NULL,             -- save / reset
+  operator   TEXT,                      -- 操作人用户名
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_rev ON prompt_revisions(created_at);
+
+-- 待人工确认的写操作。
+-- 为什么不放在进程内存：多 worker 部署时「确认」请求会被负载均衡打到另一个进程，
+-- 那个进程的字典里没有这条记录，员工点确认只会得到 409。放到库里之后，
+-- 任何一个 worker 都能读到挂起状态，也只有一次 UPDATE 能抢到它。
+CREATE TABLE IF NOT EXISTS pending_confirms (
+  id         TEXT PRIMARY KEY,          -- cf_<run_id>_<时间片>
+  run_id     TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  tool       TEXT NOT NULL,
+  args       TEXT NOT NULL,             -- 预检通过的完整参数（JSON，已脱敏）
+  statement  TEXT,                      -- 员工改过的正文；NULL 表示沿用 args 里的原文
+  status     TEXT NOT NULL DEFAULT 'pending',
+                                        -- pending / confirmed / cancelled / timeout / abandoned
+  created_at TEXT NOT NULL,
+  expires_at REAL NOT NULL,             -- unix 秒，数值比较不受时区字符串格式影响
+  decided_at TEXT,
+  decided_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_confirm_session ON pending_confirms(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_pending_confirm_status ON pending_confirms(status, expires_at);
 """
 
 # 为已有数据库补列：CREATE TABLE IF NOT EXISTS 不会给老表加字段，
@@ -572,11 +609,17 @@ def _overview_stats_sync() -> dict[str, Any]:
         "SELECT COUNT(*) FROM messages WHERE ai_risk = 'high' AND "
         "(flag_status IS NULL OR flag_status = 'none')"
     ).fetchone()[0]
+    # 仍在等待窗口内的确认：运营最该先看这个数，大于 0 说明有人卡在闸门前
+    awaiting = conn.execute(
+        "SELECT COUNT(*) FROM pending_confirms WHERE status = 'pending' AND expires_at > ?",
+        (time.time(),),
+    ).fetchone()[0]
     return {
         "today_messages": today_messages,
         "total_sessions": total_sessions,
         "flagged": flagged,
         "ai_suspect": ai_suspect,
+        "awaiting_confirm": awaiting,
     }
 
 
@@ -971,3 +1014,430 @@ async def list_runs(user_id: str | None = None, limit: int = 20) -> list[dict[st
 async def list_steps(run_id: str) -> list[dict[str, Any]]:
     return await asyncio.to_thread(_list_steps_sync, run_id)
 
+
+# ---------------------------------------------------------------------------
+# 提示词版本：每次保存都留快照，改坏了能回滚
+# ---------------------------------------------------------------------------
+
+def _save_prompt_revision_sync(content: str, action: str,
+                               operator: str | None) -> str:
+    conn = _get_conn()
+    rev_id = f"pr_{uuid.uuid4().hex[:12]}"
+    with _lock:
+        conn.execute(
+            "INSERT INTO prompt_revisions (id, content, action, operator, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (rev_id, content, action, operator, _now()),
+        )
+        conn.commit()
+    return rev_id
+
+
+def _list_prompt_revisions_sync(limit: int = 10) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, content, action, operator, created_at "
+        "FROM prompt_revisions ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        # 列表只给摘要，避免一次把十几份全文塞进页面；
+        # 需要全文时前端拿 id 单独取。
+        item["preview"] = (item["content"] or "").strip().replace("\n", " ")[:60]
+        item["length"] = len(item["content"] or "")
+        item.pop("content")
+        out.append(item)
+    return out
+
+
+def _get_prompt_revision_sync(rev_id: str) -> dict[str, Any] | None:
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, content, action, operator, created_at FROM prompt_revisions WHERE id = ?",
+        (rev_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+async def save_prompt_revision(content: str, action: str = "save",
+                               operator: str | None = None) -> str:
+    return await asyncio.to_thread(_save_prompt_revision_sync, content, action, operator)
+
+
+async def list_prompt_revisions(limit: int = 10) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_list_prompt_revisions_sync, limit)
+
+
+async def get_prompt_revision(rev_id: str) -> dict[str, Any] | None:
+    return await asyncio.to_thread(_get_prompt_revision_sync, rev_id)
+
+
+# ---------------------------------------------------------------------------
+# 审计：按条件查执行轨迹
+# ---------------------------------------------------------------------------
+
+# 状态筛选允许的取值，和 agent.py 里写入的 status 保持一致。
+AUDIT_STATUSES = ("running", "awaiting_confirm", "done", "error", "capped")
+
+
+def _audit_filters(user_id: str | None, status: str | None, keyword: str | None,
+                   days: int | None) -> tuple[str, list[Any]]:
+    """
+    拼接 WHERE 子句。
+
+    全部用参数占位符，不拼字符串——审计页的关键词来自地址栏，
+    直接拼 SQL 就是一个现成的注入点。
+    """
+    clauses = ["1=1"]
+    params: list[Any] = []
+    if user_id:
+        clauses.append("r.user_id = ?")
+        params.append(user_id)
+    if status:
+        clauses.append("r.status = ?")
+        params.append(status)
+    if keyword:
+        clauses.append("(r.question LIKE ? OR r.id LIKE ? OR r.session_id LIKE ?)")
+        like = f"%{keyword}%"
+        params.extend([like, like, like])
+    if days and days > 0:
+        cutoff = (datetime.now(timezone.utc).astimezone()
+                  - timedelta(days=days)).isoformat(timespec="microseconds")
+        clauses.append("r.started_at >= ?")
+        params.append(cutoff)
+    return " AND ".join(clauses), params
+
+
+def _list_audit_runs_sync(user_id: str | None, status: str | None,
+                          keyword: str | None, days: int | None,
+                          limit: int) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    where, params = _audit_filters(user_id, status, keyword, days)
+    rows = conn.execute(
+        f"""SELECT r.*,
+                   COALESCE(u.display_name, r.user_id) AS display_name,
+                   COALESCE(u.username, r.user_id) AS username
+            FROM agent_runs r
+            LEFT JOIN users u ON u.id = r.user_id
+            WHERE {where}
+            ORDER BY r.started_at DESC
+            LIMIT ?""",  # noqa: S608 - where 由固定子句拼成，值全部走参数
+        (*params, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _get_audit_run_sync(run_id: str) -> dict[str, Any] | None:
+    """取单条执行记录，附带员工姓名，供审计详情页使用。"""
+    conn = _get_conn()
+    row = conn.execute(
+        """SELECT r.*,
+                  COALESCE(u.display_name, r.user_id) AS display_name,
+                  COALESCE(u.username, r.user_id) AS username
+           FROM agent_runs r
+           LEFT JOIN users u ON u.id = r.user_id
+           WHERE r.id = ?""",
+        (run_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _count_audit_runs_sync(user_id: str | None, status: str | None,
+                           keyword: str | None, days: int | None) -> int:
+    conn = _get_conn()
+    where, params = _audit_filters(user_id, status, keyword, days)
+    row = conn.execute(
+        f"SELECT COUNT(*) AS c FROM agent_runs r WHERE {where}",  # noqa: S608
+        params,
+    ).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _audit_stats_sync(days: int = 7) -> dict[str, Any]:
+    """
+    审计页顶部的小结：这段时间跑了多少、失败多少、慢在哪。
+
+    只统计指定天数内的数据，避免历史全量把平均值拖偏。
+    """
+    conn = _get_conn()
+    cutoff = (datetime.now(timezone.utc).astimezone()
+              - timedelta(days=max(days, 1))).isoformat(timespec="microseconds")
+    run = conn.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed,
+                  SUM(CASE WHEN confirm_count > 0 THEN 1 ELSE 0 END) AS confirmed,
+                  AVG(CASE WHEN elapsed_ms IS NOT NULL THEN elapsed_ms END) AS avg_ms
+           FROM agent_runs WHERE started_at >= ?""",
+        (cutoff,),
+    ).fetchone()
+    total = int(run["total"] or 0)
+    failed = int(run["failed"] or 0)
+
+    slow = conn.execute(
+        """SELECT tool_name, COUNT(*) AS calls, AVG(duration_ms) AS avg_ms,
+                  SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures
+           FROM agent_steps
+           WHERE created_at >= ? AND kind = 'tool' AND tool_name IS NOT NULL
+           GROUP BY tool_name ORDER BY calls DESC LIMIT 8""",
+        (cutoff,),
+    ).fetchall()
+    return {
+        "total": total,
+        "failed": failed,
+        "confirmed": int(run["confirmed"] or 0),
+        "avg_ms": int(run["avg_ms"] or 0),
+        "error_rate": round(failed / total * 100, 1) if total else 0.0,
+        "tools": [dict(row) for row in slow],
+        "days": days,
+    }
+
+
+async def list_audit_runs(user_id: str | None = None, status: str | None = None,
+                          keyword: str | None = None, days: int | None = 7,
+                          limit: int = 50) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(
+        _list_audit_runs_sync, user_id, status, keyword, days, limit)
+
+
+async def count_audit_runs(user_id: str | None = None, status: str | None = None,
+                           keyword: str | None = None,
+                           days: int | None = 7) -> int:
+    return await asyncio.to_thread(
+        _count_audit_runs_sync, user_id, status, keyword, days)
+
+
+async def get_audit_run(run_id: str) -> dict[str, Any] | None:
+    return await asyncio.to_thread(_get_audit_run_sync, run_id)
+
+
+async def audit_stats(days: int = 7) -> dict[str, Any]:
+    return await asyncio.to_thread(_audit_stats_sync, days)
+
+
+# ---------------------------------------------------------------------------
+# 日志保留：按天清理运行轨迹
+# ---------------------------------------------------------------------------
+
+# 这些表是「运行日志」而不是业务单据：可以清。
+# drafts / validations / sessions / messages 是业务留痕，不在清理范围内。
+_LOG_TABLES = (
+    ("agent_steps", "created_at"),
+    ("tool_calls", "created_at"),
+    ("agent_runs", "started_at"),
+)
+
+
+def _purge_logs_sync(days: int, dry_run: bool = False) -> dict[str, Any]:
+    conn = _get_conn()
+    cutoff = (datetime.now(timezone.utc).astimezone()
+              - timedelta(days=max(days, 1))).isoformat(timespec="microseconds")
+    counts: dict[str, int] = {}
+    for table, column in _LOG_TABLES:
+        # 表名与列名都是本模块写死的常量，不存在外部输入
+        row = conn.execute(
+            f"SELECT COUNT(*) AS c FROM {table} WHERE {column} < ?",  # noqa: S608
+            (cutoff,),
+        ).fetchone()
+        counts[table] = int(row["c"] or 0)
+    if not dry_run and any(counts.values()):
+        with _lock:
+            # 先删明细再删主记录：即使中途失败，也不会留下指向空 run 的明细
+            for table, column in _LOG_TABLES:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {column} < ?",  # noqa: S608
+                    (cutoff,),
+                )
+            conn.commit()
+    return {"cutoff": cutoff, "days": days, "dry_run": dry_run, "deleted": counts}
+
+
+async def purge_logs(days: int, dry_run: bool = False) -> dict[str, Any]:
+    return await asyncio.to_thread(_purge_logs_sync, days, dry_run)
+
+
+def _retention_settings_sync() -> dict[str, Any]:
+    """
+    读取日志保留配置。
+
+    每次调用都重新读环境变量，而不是模块导入时读一次：
+    测试里改 env 就能立刻生效，不用 reload 模块。
+    """
+    raw = os.getenv("LOG_RETENTION_DAYS", "90")
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 90
+    return {
+        "days": days,
+        "enabled": days > 0,   # 0 表示关闭自动清理，只保留手动入口
+        "source": "LOG_RETENTION_DAYS",
+    }
+
+
+async def get_retention_settings() -> dict[str, Any]:
+    return await asyncio.to_thread(_retention_settings_sync)
+
+
+
+# ---------------------------------------------------------------------------
+# 人工确认：跨进程可见的闸门状态
+# ---------------------------------------------------------------------------
+# 语义边界（这一点没有被持久化改变）：
+#   * 只有 pending 能被处理，一旦落到终态就不可再改，重复点击返回同样的提示；
+#   * 过期的确认不会因为「数据库中留有记录」而复活，必须重新发起；
+#   * 持久化只解决「谁都能看见」，不解决「谁都能点」——越权判断仍在 SQL 之前。
+
+def _create_pending_confirm_sync(confirm_id: str, run_id: str, session_id: str,
+                                 user_id: str, tool: str, args: dict[str, Any],
+                                 ttl_sec: int) -> None:
+    conn = _get_conn()
+    with _lock:
+        conn.execute(
+            "INSERT INTO pending_confirms "
+            "(id, run_id, session_id, user_id, tool, args, status, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (confirm_id, run_id, session_id, user_id, tool,
+             json.dumps(args, ensure_ascii=False), _now(), time.time() + ttl_sec),
+        )
+        conn.commit()
+
+
+def _get_pending_confirm_sync(confirm_id: str) -> dict[str, Any] | None:
+    row = _get_conn().execute(
+        "SELECT * FROM pending_confirms WHERE id = ?", (confirm_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    item = dict(row)
+    item["args"] = _loads(item.get("args")) or {}
+    return item
+
+
+def _resolve_pending_confirm_sync(confirm_id: str, user_id: str, action: str,
+                                  statement: str | None) -> tuple[bool, str]:
+    """
+    把一条待确认记录从 pending 推到终态，返回「是否抢到」。
+
+    这里先查再改，看似有竞态，实际上真正的互斥在最后那条 UPDATE 的
+    `WHERE status='pending'`：两个请求同时到达时只有一个能 rowcount=1，
+    另一个拿到 0 会被判为「已经处理过」。先查只是为了给用户更准确的话术。
+    """
+    if action not in ("confirm", "cancel"):
+        return False, "action 只能是 confirm 或 cancel"
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT user_id, status, expires_at FROM pending_confirms WHERE id = ?",
+        (confirm_id,),
+    ).fetchone()
+    if row is None:
+        return False, "确认请求不存在或已失效，请重新发起"
+    if row["user_id"] != user_id:
+        return False, "无权确认他人发起的草稿"
+    if row["status"] != "pending":
+        return False, "该确认已经处理过了"
+    if float(row["expires_at"]) <= time.time():
+        with _lock:
+            conn.execute(
+                "UPDATE pending_confirms SET status = 'timeout', decided_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (_now(), confirm_id),
+            )
+            conn.commit()
+        return False, "确认已超过等待时限，请重新发起"
+
+    status = "confirmed" if action == "confirm" else "cancelled"
+    with _lock:
+        cur = conn.execute(
+            "UPDATE pending_confirms SET status = ?, statement = COALESCE(?, statement), "
+            "decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending'",
+            (status, statement, _now(), user_id, confirm_id),
+        )
+        conn.commit()
+    if cur.rowcount != 1:
+        return False, "该确认已经处理过了"
+    return True, "ok"
+
+
+def _close_pending_confirm_sync(confirm_id: str, status: str = "abandoned") -> None:
+    """
+    由挂起方收尾：超时或连接断开时把记录推到终态。
+
+    只接受 timeout / abandoned 两种终态——确认必须由 HTTP 接口写入，
+    不能让「等不到人」的代码路径顺手把它标成 confirmed。
+    """
+    if status not in ("timeout", "abandoned"):
+        status = "abandoned"
+    conn = _get_conn()
+    with _lock:
+        conn.execute(
+            "UPDATE pending_confirms SET status = ?, decided_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (status, _now(), confirm_id),
+        )
+        conn.commit()
+
+
+def _list_pending_confirms_sync(session_id: str, status: str = "pending") -> list[dict[str, Any]]:
+    # 带上 expires_at 条件：过期的记录即使还没被后台扫成 timeout，
+    # 也不该出现在「待确认」列表里——那是一张点了必然失败的卡片。
+    rows = _get_conn().execute(
+        "SELECT * FROM pending_confirms WHERE session_id = ? AND status = ? "
+        "AND expires_at > ? ORDER BY created_at DESC",
+        (session_id, status, time.time()),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["args"] = _loads(item.get("args")) or {}
+        out.append(item)
+    return out
+
+
+def _expire_stale_confirms_sync() -> int:
+    """
+    批量收尾过期确认，供后台协程调用。
+
+    没有它也不会出错（读取时仍会判过期），但留着 pending 记录会让
+    「待确认」查询把早已失效的卡片算进去。
+    """
+    conn = _get_conn()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE pending_confirms SET status = 'timeout', decided_at = ? "
+            "WHERE status = 'pending' AND expires_at <= ?",
+            (_now(), time.time()),
+        )
+        conn.commit()
+    return int(cur.rowcount or 0)
+
+
+async def create_pending_confirm(confirm_id: str, run_id: str, session_id: str,
+                                 user_id: str, tool: str, args: dict[str, Any],
+                                 ttl_sec: int) -> None:
+    await asyncio.to_thread(_create_pending_confirm_sync, confirm_id, run_id,
+                            session_id, user_id, tool, args, ttl_sec)
+
+
+async def get_pending_confirm(confirm_id: str) -> dict[str, Any] | None:
+    return await asyncio.to_thread(_get_pending_confirm_sync, confirm_id)
+
+
+async def resolve_pending_confirm(confirm_id: str, user_id: str, action: str,
+                                  statement: str | None = None) -> tuple[bool, str]:
+    return await asyncio.to_thread(_resolve_pending_confirm_sync, confirm_id,
+                                   user_id, action, statement)
+
+
+async def close_pending_confirm(confirm_id: str, status: str = "abandoned") -> None:
+    await asyncio.to_thread(_close_pending_confirm_sync, confirm_id, status)
+
+
+async def list_pending_confirms(session_id: str, status: str = "pending") -> list[dict[str, Any]]:
+    return await asyncio.to_thread(_list_pending_confirms_sync, session_id, status)
+
+
+async def expire_stale_confirms() -> int:
+    return await asyncio.to_thread(_expire_stale_confirms_sync)

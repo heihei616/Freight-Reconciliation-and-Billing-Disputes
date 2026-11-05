@@ -108,13 +108,18 @@ async def run_case(case: dict[str, Any], user_id: str) -> dict[str, Any]:
         elif name == "confirm_open":
             # 脚本扮演员工：看一眼草稿，2.5 秒后点确认。
             # 别设成 1 秒——正文流式推送本身就要一两秒，太短的延迟会让「等待时长」看起来是 0。
+            # submit_confirmation 现在要写库，是协程，所以通过事件循环排一个任务，
+            # 而不是直接调函数（直接调只会得到一个未 await 的 coroutine 对象）。
             confirms.append({"confirm_id": data.get("confirm_id"),
                              "amount": data.get("amount"),
                              "decision": "confirm"})
-            asyncio.get_event_loop().call_later(
-                2.5, agent.submit_confirmation,
-                data.get("confirm_id"), user_id, "confirm", None,
-            )
+            confirm_id = data.get("confirm_id")
+
+            async def _click(cid: str = confirm_id) -> None:
+                await asyncio.sleep(2.5)
+                await agent.submit_confirmation(cid, user_id, "confirm", None)
+
+            asyncio.get_event_loop().create_task(_click())
 
     elapsed = int((time.perf_counter() - started) * 1000)
     return {

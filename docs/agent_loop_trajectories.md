@@ -56,7 +56,7 @@ agent.run()
 ### 日志表
 
 **`agent_runs`**（一次提问一行）：`session_id / user_id / question / skill / status / rounds / tool_calls / confirm_count / elapsed_ms / started_at / finished_at`。
-`status` 取值：`running` / `awaiting_confirm` / `done` / `max_rounds` / `error` / `capped`（工具调用总数超限）。
+`status` 取值：`running` / `awaiting_confirm` / `done` / `error` / `capped`（工具调用总数超限）/ `cancelled`（等待确认时连接断开）。
 
 **`agent_steps`**（每次工具调用或人工确认一行）：
 
@@ -183,6 +183,6 @@ WHERE kind='confirm' AND tool_args LIKE '%"confirm"%';
 ## 五、已知限制
 
 1. **5 轮很紧**。依赖链决定最短序列是 `(search+list+quota) → (bill+evidence) → calc → validate → draft`，正好用满；模型一旦把某个工具拆成单独一轮，就要靠「建单收尾轮」兜底。如果用户中途补充信息（"再看看另一张账单"），后面几轮大概率被 `max_rounds` 截断，只能给阶段性结论。这是需求的硬约束，不是 bug——若要更宽松，可把 `MAX_ROUNDS` 做成按 skill 配置。
-2. **中断只在单进程内有效**。`_CONFIRMS` 是进程内存字典，多 worker 部署时要换成 Redis 之类的共享状态，否则确认请求会打到没有挂起者的进程上。
-3. **页面刷新会丢掉确认卡**。草稿卡片可以从 `/api/disputes` 重建（已在顶部"待确认草稿"栏实现），但**尚未执行的确认中断**无法重建——连接一断，那次中断就作废，用户需要重新问一次。这是"确认只对当前连接有效"的代价，是刻意的。
+2. **跨进程唤醒靠轮询**。确认状态已经存进 `pending_confirms`，多 worker 不会再出现「点确认报不存在」；但另一个 worker 写的决策，要等等待方下一次轮询（0.4 秒）才发现。要更低延迟得上消息总线，当前规模不值当。
+3. **确认卡能在刷新后重建，但不是实时的**。顶部「待办」栏会用 `GET /api/agent/confirm/pending` 把仍在等待窗口内的确认画出来，正文和剩余秒数都来自数据库；可一旦超过 180 秒，重建出来的卡片点了也会被拒——时限由服务端判定，不看前端显示。
 4. **人工确认耗时被算进工具耗时**。日志里 `create_dispute_draft` 的 `duration_ms` 含员工思考时间；如果阶段 5 要统计"工具性能"，记得按 `kind='confirm'` 单独剔除。

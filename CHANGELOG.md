@@ -2,6 +2,53 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号采用语义化版本。
 
+## [1.3.0] - 2026-11-05
+
+### 新增
+
+- **确认状态持久化**：新增 `pending_confirms` 表，把「建单前中断」的状态从进程内存搬进 SQLite。多 worker 部署时确认请求打到哪个进程都能处理，重启服务也不会让还没超时的确认变成死按钮。唯一事实来源是数据库，本地 `asyncio.Event` 只用于同进程快速唤醒；跨进程由等待方每 0.4 秒读一次状态。
+- **确认终态可审计**：`pending / confirmed / cancelled / timeout / abandoned` 五态，带 `decided_at`、`decided_by` 与员工最终采用的正文。页面关闭或连接中断会落 `abandoned`，超时落 `timeout`，不再有「记录留在 `awaiting_confirm` 但没人知道后来怎样」的悬空状态。
+- **`GET /api/agent/confirm/pending`**：按会话查询仍在等待窗口内的确认，供页面刷新或切换会话后重建确认卡。过期的记录不会返回。
+- **待办栏合并展示**：首页顶部现在同时列出「挂起的建单确认」和「待提交的草稿」，两类卡片都能在刷新后恢复。
+- **确认正文可编辑**：员工在点确认前可以直接改草稿措辞，改后的版本随确认一起提交（服务端 `statement` 字段，上限 1200 字）；不传则沿用模型生成的原文。
+- 测试从 123 条增至 140 条，新增 `tests/test_confirm.py`：越权确认、重复点击、过期拒绝、收尾不可伪造、跨进程读取决策五组。
+
+### 修复
+
+- **多 worker 下确认必然失败**：`_CONFIRMS` 是模块级字典，确认请求被负载均衡打到另一个 worker 时，那边没有这条记录，员工只会看到 409。现在改由 `WHERE status='pending'` 的原子更新抢占，只有一个请求能成功。
+- **刷新页面等于放弃建单**：以前挂起的 `asyncio.Event` 无法重建，刷新后草稿卡片在、确认卡没了。现在正文与时限都在库里，重建的卡片仍然可点（是否有效由服务端的 `expires_at` 判定，不看前端倒计时）。
+- **取消后残留 `awaiting_confirm`**：连接断开时只清理内存字典，确认记录和运行记录都停在等待态。现在确认落 `abandoned`，运行落新增的 `cancelled` 状态，审计页显示「连接中断」。
+- **停机期间到点的确认无人处理**：启动时先批量把 `expires_at` 已过的记录标成 `timeout`，避免待办列表里出现点了必然失败的卡片。
+
+### 变更
+
+- `scripts/deploy.sh` 的注释更新：确认中断已支持多 worker，但限流计数仍在内存，横向扩展前要先换 Redis 计数器。
+- 设计说明的「已知限制」重写：移除「确认在单进程内存」「刷新丢确认」「没有日志保留期」三条已解决项，补上跨进程 0.4 秒延迟、多标签页不自动同步、`pending_confirms` 不自动清理三条新边界。
+
+## [1.2.0] - 2026-11-05
+
+### 新增
+
+- **提示词模板管理**：`/admin/prompt` 页面，配合 `GET /admin/api/prompt`、`PUT /admin/api/prompt`、`DELETE /admin/api/prompt` 与 `POST /admin/api/prompt/restore/{id}`。后台维护的是**补充要求**，追加到内置提示词末尾，硬性规则不可配置；每次保存写入 `prompt_revisions` 快照，支持查看历史与一键恢复。
+- **对话审计**：`/admin/audit` 页面与 `GET /admin/api/audit/runs`、`GET /admin/api/audit/runs/{run_id}`。支持按员工、状态、关键词、时间范围筛选，展开可见每一轮工具名、参数、耗时、结果摘要与失败码；顶部汇总失败率、平均耗时与工具调用分布。
+- **日志保留**：`db.purge_logs()` 按天清理 `agent_runs` / `agent_steps` / `tool_calls`，后台协程启动先清一次、之后每 24 小时一次；`LOG_RETENTION_DAYS=0` 可关闭。管理员可通过 `GET /admin/api/maintenance/retention` 预演、`POST /admin/api/maintenance/purge` 手动执行。
+- **Cookie Secure**：登录 Cookie 按请求协议自动加 `Secure`（反向代理下读 `X-Forwarded-Proto`），可用 `COOKIE_SECURE` 强制开关。
+- **演示口令告警**：启动时校验 `admin` / `employee` 是否仍在使用演示口令，在日志第一屏明确提示。
+- 测试从 88 条增至 123 条，新增提示词拼接、审计/清理、执行预算与准备句过滤四组用例。
+
+### 修复
+
+- **提示词配置形同虚设**：`settings.system_prompt` 已写入数据库、总览页也显示其字数，但 `agent.py` 从未读取，改配置没有任何效果。现在每轮读取并注入提示词。
+- **默认提示词语义冲突**：早期 `DEFAULT_SYSTEM_PROMPT` 是一句话的「整段提示词」，与 `skills.build_system_prompt()` 的内置规则重复且更弱。现改为补充要求，并在启动时自动迁移未修改过的旧值。
+- **导航死链**：管理后台侧边栏早有「提示词模板」「对话审计」两项，但对应路由不存在，点击返回 404。
+- **检索重复调用**：指纹去重只能拦住参数完全相同的调用，模型查不到时会不断换关键词重试（评测中同一题连查 6 次）。新增按工具名的专项预算，`search_policy` 最多 3 次，超出后强制基于已有片段下结论。
+- **英文准备句泄漏**：模型偶尔在调用工具前输出 `I'll look up the policy...`，这句话会先于工具结果流到页面。新增 `PreambleFilter`，只丢弃「整句无中文且以 I'll / Let me 等开头」的句子；正常中文仍逐字流式输出，不会被缓存拖慢。
+
+### 变更
+
+- 错误码 1013 的上限由 4000 字改为 2000 字，与 `skills.MAX_SUPPLEMENT_CHARS` 对齐；新增 1023~1025。
+- 总览页「系统提示词」改称「补充要求」，与页面语义一致。
+
 ## [1.1.0] - 2026-11-05
 
 ### 新增

@@ -38,6 +38,7 @@ make check
 | 新增接口 | `python scripts/check_docs.py`（会核对路由与文档） |
 | 新增环境变量 | `python scripts/check_repo.py`（会核对 `.env.example`） |
 | 新增或删除文档、脚本 | `python scripts/check_docs.py` |
+| 改动人工确认、`pending_confirms` 表 | `python scripts/check_confirm_api.py`（需服务已启动，不调用模型） |
 
 涉及模型行为时，补充 `tests/data/eval_cases.json` 用例并记录真实轨迹；**不要把 mock 结果写成真实模型验证结果**。
 

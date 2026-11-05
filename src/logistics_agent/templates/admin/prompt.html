@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}提示词模板{% endblock %}
+{% block heading %}提示词模板{% endblock %}
+
+{% block content %}
+<div class="alert info">
+  这里维护的是<b>补充要求</b>，会追加到系统提示词末尾，用于统一口径与措辞。
+  硬性规则（金额只能来自工具、无校验凭证不得建单、提交必须人工确认）写在代码里，
+  <b>不能通过这里修改或关闭</b>。保存后下一次提问立即生效，无需重启服务。
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">当前补充要求</div>
+    <div class="value" id="statLen">{{ content | length }}</div>
+    <div class="hint">上限 {{ max_chars }} 字</div>
+  </div>
+  <div class="stat">
+    <div class="label">拼入后增加</div>
+    <div class="value" id="statDelta">+{{ delta_chars }}</div>
+    <div class="hint">相对内置提示词的字数</div>
+  </div>
+  <div class="stat">
+    <div class="label">最后修改</div>
+    <div class="value" style="font-size:15px;margin-top:9px">
+      {% if meta %}{{ meta.updated_at[:19].replace('T', ' ') }}{% else %}未修改{% endif %}
+    </div>
+    <div class="hint">{% if meta %}操作人 {{ meta.updated_by or '-' }}{% else %}使用内置默认{% endif %}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>补充要求</h2>
+      <p>建议写成条目式，一条一句；与硬性规则冲突的内容不会生效</p>
+    </div>
+  </div>
+  <div class="card-body">
+    <div class="field">
+      <label for="content">内容</label>
+      <textarea id="content" rows="10" maxlength="{{ max_chars }}"
+                placeholder="例如：&#10;- 称呼统一用「你」，不用「您」。&#10;- 金额保留两位小数并带「元」。">{{ content }}</textarea>
+      <div class="desc">
+        已输入 <span id="counter">{{ content | length }}</span> / {{ max_chars }} 字。
+        留空表示不追加任何补充要求。
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button class="btn" type="button" id="saveBtn">保存并生效</button>
+      <button class="btn ghost" type="button" id="resetBtn">恢复默认</button>
+      <button class="btn ghost" type="button" id="reloadBtn">放弃修改</button>
+    </div>
+    <div id="msg" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>生效预览</h2>
+      <p>用示例状态拼接后的真实提示词。内置部分只读，补充要求会出现在最末尾</p>
+    </div>
+  </div>
+  <div class="card-body">
+    <details>
+      <summary style="cursor:pointer;font-size:13px;color:var(--brand)">展开完整提示词（约 <span id="previewLen">{{ final_preview | length }}</span> 字）</summary>
+      <pre id="preview" style="white-space:pre-wrap;line-height:1.7;font-size:12.5px;background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:12px;max-height:460px;overflow:auto">{{ final_preview }}</pre>
+    </details>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:13px;color:var(--ink-2)">只看内置部分（不可编辑）</summary>
+      <pre style="white-space:pre-wrap;line-height:1.7;font-size:12.5px;background:#f8fafc;border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:12px;max-height:360px;overflow:auto">{{ base_preview }}</pre>
+    </details>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>版本历史</h2>
+      <p>最近 10 次保存。恢复旧版本也会记一条新版本，历史不会断</p>
+    </div>
+  </div>
+  {% if revisions %}
+  <table>
+    <thead>
+      <tr><th style="width:170px">时间</th><th style="width:90px">操作人</th>
+          <th style="width:80px">动作</th><th>内容摘要</th>
+          <th style="width:90px">字数</th><th style="width:80px">操作</th></tr>
+    </thead>
+    <tbody>
+      {% for rev in revisions %}
+      <tr>
+        <td class="mono">{{ rev.created_at[:19].replace('T', ' ') }}</td>
+        <td>{{ rev.operator or '-' }}</td>
+        <td>
+          {% if rev.action == 'save' %}<span class="tag info">保存</span>
+          {% elif rev.action == 'restore' %}<span class="tag warn">恢复</span>
+          {% elif rev.action == 'reset' %}<span class="tag gray">重置</span>
+          {% else %}<span class="tag gray">系统</span>{% endif %}
+        </td>
+        <td class="muted">{{ rev.preview or '（空）' }}</td>
+        <td class="mono">{{ rev.length }}</td>
+        <td><button class="btn ghost sm" type="button" data-restore="{{ rev.id }}">恢复</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">还没有保存记录。第一次保存后会在这里留下快照。</div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const MAX = {{ max_chars }};
+
+  function setMsg(text, kind) {
+    const box = $("msg");
+    box.textContent = text || "";
+    box.className = text ? "alert " + (kind || "ok") : "";
+  }
+
+  function updateCounter() {
+    const len = $("content").value.length;
+    $("counter").textContent = len;
+    $("statLen").textContent = len;
+  }
+
+  /** 统一处理接口返回：非 2xx 时把信封里的中文消息抛出来。 */
+  async function call(url, options) {
+    const response = await fetch(url, options);
+    let payload = null;
+    try { payload = await response.json(); } catch (_) { /* 忽略非 JSON */ }
+    if (!response.ok) {
+      throw new Error((payload && payload.message) || `请求失败（HTTP ${response.status}）`);
+    }
+    return payload || {};
+  }
+
+  /** 保存/恢复/重置成功后，把页面上的编辑区与预览一起刷新。 */
+  function applyPayload(data) {
+    if (typeof data.content === "string") {
+      $("content").value = data.content;
+      updateCounter();
+    }
+    if (data.final_preview) {
+      $("preview").textContent = data.final_preview;
+      $("previewLen").textContent = data.final_preview.length;
+    }
+    if (typeof data.delta_chars === "number") {
+      $("statDelta").textContent = (data.delta_chars >= 0 ? "+" : "") + data.delta_chars;
+    }
+  }
+
+  async function save() {
+    const content = $("content").value;
+    if (content.length > MAX) {
+      setMsg(`内容 ${content.length} 字，超过上限 ${MAX} 字`, "danger");
+      return;
+    }
+    $("saveBtn").disabled = true;
+    try {
+      const data = await call("/admin/api/prompt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      applyPayload(data);
+      setMsg(data.message || "已保存", "ok");
+      // 版本历史由服务端渲染，刷新一次拿到最新快照最省事
+      setTimeout(() => window.location.reload(), 700);
+    } catch (error) {
+      setMsg(error.message, "danger");
+    } finally {
+      $("saveBtn").disabled = false;
+    }
+  }
+
+  async function reset() {
+    if (!window.confirm("确定恢复成内置默认补充要求？当前内容会先存成一个版本，可以再恢复回来。")) return;
+    try {
+      const data = await call("/admin/api/prompt", { method: "DELETE" });
+      applyPayload(data);
+      setMsg(data.message || "已恢复默认", "ok");
+      setTimeout(() => window.location.reload(), 700);
+    } catch (error) {
+      setMsg(error.message, "danger");
+    }
+  }
+
+  async function restore(revId) {
+    if (!window.confirm("确定用这个版本覆盖当前内容？")) return;
+    try {
+      const data = await call(`/admin/api/prompt/restore/${encodeURIComponent(revId)}`, {
+        method: "POST",
+      });
+      applyPayload(data);
+      setMsg(data.message || "已恢复", "ok");
+      setTimeout(() => window.location.reload(), 700);
+    } catch (error) {
+      setMsg(error.message, "danger");
+    }
+  }
+
+  $("content").addEventListener("input", updateCounter);
+  $("saveBtn").addEventListener("click", save);
+  $("resetBtn").addEventListener("click", reset);
+  $("reloadBtn").addEventListener("click", () => window.location.reload());
+
+  document.querySelectorAll("[data-restore]").forEach((btn) => {
+    btn.addEventListener("click", () => restore(btn.dataset.restore));
+  });
+
+  updateCounter();
+})();
+</script>
+{% endblock %}

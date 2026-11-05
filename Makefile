@@ -1,7 +1,7 @@
 # ============================================================
 # 常用任务入口。Windows 没装 make 时，直接用下面注释里的等价命令。
 # ============================================================
-.PHONY: help install install-dev run test coverage lint fmt check docs demo clean
+.PHONY: help install install-dev run test coverage lint fmt check docs demo smoke-confirm clean
 
 PY ?= python
 export PYTHONPATH := src
@@ -52,6 +52,10 @@ docs:  ## 只校验文档与代码的一致性
 
 demo:  ## 离线业务示例（不调用模型）
 	$(PY) examples/demo.py
+
+smoke-confirm:  ## 服务已启动时验证确认接口（不调用模型）
+	$(PY) scripts/check_confirm_api.py
+# 等价：PYTHONPATH=src python scripts/check_confirm_api.py
 
 clean:  ## 清理缓存与本地运行数据（不会碰 data/knowledge）
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

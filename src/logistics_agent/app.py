@@ -39,13 +39,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, File, Form, Header, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import (
     FileResponse,
@@ -59,7 +61,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import agent, auth, db, llm, ratelimit
+from . import agent, auth, db, llm, ratelimit, skills
 from .rag_service import (
     MAX_UPLOAD_BYTES,
     kb_service,
@@ -101,7 +103,7 @@ ERRORS: dict[int, str] = {
     1010: "该账号已被停用，请联系管理员",
     1011: "需要管理员权限",
     1012: "提示词不能为空",
-    1013: "提示词过长，请控制在 4000 字以内",
+    1013: "提示词过长，请控制在 2000 字以内",
     1014: "文件无法解析或疑似扫描件",
     1015: "索引重建失败，请查看服务日志",
     1016: "草稿不存在或无权操作",
@@ -111,6 +113,9 @@ ERRORS: dict[int, str] = {
     1020: "提问太频繁，请稍后再试",
     1021: "今日问答次数已用完，请明天再来",
     1022: "当前排队人数较多，请稍后再试",
+    1023: "提示词版本不存在，可能已被清理",
+    1024: "保留天数需在 1~3650 之间",
+    1025: "审计记录不存在",
     2001: "知识库尚未就绪，请稍后再试",
     2002: "尚未配置大模型，请联系管理员",
     3001: "检索失败，请重试",
@@ -136,9 +141,38 @@ def _envelope(code: int, message: str, request_id: str) -> dict[str, Any]:
     return {"code": code, "message": message, "request_id": request_id}
 
 
+async def _retention_worker() -> None:
+    """
+    日志保留的后台任务：启动先清一次，之后每 24 小时一次。
+
+    为什么要放在后台而不是请求里做：清理会锁表，遇到几十万条时要跑几秒，
+    放在请求线程里会卡住所有 SSE 连接。启动时先跑一次，是因为长期停机的
+    实例重新拉起来时，往往正是日志最需要清的时候。
+    """
+    while True:
+        settings = await db.get_retention_settings()
+        if settings["enabled"]:
+            try:
+                result = await db.purge_logs(settings["days"])
+                deleted = sum(result["deleted"].values())
+                if deleted:
+                    print(f"[清理] 已删除 {deleted} 条超过 {settings['days']} 天的运行日志")
+            except Exception as exc:  # 清理失败不能拖垮服务启动
+                print(f"[清理] 失败：{exc!r}")
+        # 顺手把过期确认收成 timeout：谁也没点、进程也重启过的那种记录，
+        # 留在 pending 里会让审计页看起来像「一直有人在等」。
+        try:
+            expired = await db.expire_stale_confirms()
+            if expired:
+                print(f"[清理] 已标记 {expired} 条超时确认")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[清理] 确认超时标记失败：{exc!r}")
+        await asyncio.sleep(24 * 3600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时：建表 → 演示账号 → 默认提示词 → 准备文档 → 加载索引。"""
+    """启动时：建表 → 演示账号 → 默认提示词 → 准备文档 → 加载索引 → 清理旧日志。"""
     await db.init_db()
     # 限流参数从环境变量读取，默认开启；RATE_LIMIT_ENABLED=0 仅供本地调试
     ratelimit.limiter.apply_config(ratelimit.RateLimitConfig.from_env())
@@ -152,7 +186,22 @@ async def lifespan(app: FastAPI):
           f"mock={llm.provider_info()['mock']}")
     if created:
         print(f"[启动] 已创建演示账号：{'、'.join(created)}")
+    # 演示口令随代码发版，一旦暴露到内网就等于后台全开。启动时明确告警，
+    # 比写在文档里等运维自己想起来更可靠。
+    insecure = await auth.insecure_demo_accounts()
+    if insecure:
+        print(f"[安全] 以下账号仍在使用演示口令，共享环境部署前必须修改：{'、'.join(insecure)}")
+
+    retention_task = asyncio.create_task(_retention_worker())
+    # 停机期间到点的确认先收掉：它们已经没有等待者，不该再出现在待确认列表里。
+    stale = await db.expire_stale_confirms()
+    if stale:
+        print(f"[启动] 已标记 {stale} 条停机期间超时的确认")
     yield
+    # 关停时先取消后台任务，避免 uvicorn 等它睡完 24 小时才退出
+    retention_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await retention_task
 
 
 app = FastAPI(title="物流费制度问答 · 员工入口", lifespan=lifespan)
@@ -294,6 +343,11 @@ class ConfirmRequest(BaseModel):
     confirm_id: str = Field(description="confirm_open 事件里给的确认编号")
     action: str = Field(default="confirm", description="confirm 或 cancel")
     statement: str | None = Field(default=None, description="员工改过的草稿正文，可省略")
+
+
+class PromptRequest(BaseModel):
+    """后台补充要求。允许空串，表示不追加任何补充。"""
+    content: str = Field(default="", description="补充要求正文，纯文本")
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +528,7 @@ async def confirm_agent_action(payload: ConfirmRequest,
     if statement and len(statement) > 1200:
         raise ApiError(1019, status=400)
 
-    ok, reason = agent.submit_confirmation(payload.confirm_id, user["id"], action, statement)
+    ok, reason = await agent.submit_confirmation(payload.confirm_id, user["id"], action, statement)
     if not ok:
         raise ApiError(1018, reason, status=409)
     return {
@@ -482,6 +536,45 @@ async def confirm_agent_action(payload: ConfirmRequest,
         "action": action,
         "message": "已确认，正在建单" if action == "confirm" else "已取消，未建单",
     }
+
+
+@app.get("/api/agent/confirm/pending")
+async def pending_confirms(session_id: str,
+                           user: dict[str, Any] = Depends(require_api_user)):
+    """
+    这个会话里还没被处理的确认，供页面刷新后重建确认卡。
+
+    以前确认只活在内存里，刷新页面就等于把这次中断作废；现在草稿正文和
+    等待时限都在库里，重建出来的卡片仍然可以点——但点了之后是否还算数，
+    仍由服务端按 expires_at 判定，前端拿到的 deadline 只是用于倒计时展示。
+    """
+    session = await db.get_session(session_id)
+    if session is None:
+        raise ApiError(1004, status=404)
+    if session["user_id"] != user["id"]:
+        raise ApiError(1005, status=403)
+
+    rows = await agent.list_pending_confirms(session_id)
+    now = time.time()
+    items = []
+    for row in rows:
+        args = row.get("args") or {}
+        validation = await db.get_validation(str(args.get("validation_id", "")))
+        items.append({
+            "confirm_id": row["id"],
+            "run_id": row["run_id"],
+            "tool": row["tool"],
+            "bill_no": (validation or {}).get("bill_no") or args.get("bill_no"),
+            "dispute_type": args.get("dispute_type"),
+            "amount": args.get("amount"),
+            "evidence": args.get("evidence") or [],
+            "issues": (validation or {}).get("issues") or [],
+            "total_delta": (validation or {}).get("total_delta"),
+            "statement": row.get("statement") or args.get("statement") or "",
+            "created_at": row["created_at"],
+            "remain_sec": max(0, int(float(row["expires_at"]) - now)),
+        })
+    return {"confirms": items}
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +767,209 @@ async def admin_reindex(user: dict[str, Any] = Depends(require_api_admin)):
 
 
 # ---------------------------------------------------------------------------
+# 提示词模板：页面 + 接口（仅管理员）
+# ---------------------------------------------------------------------------
+# 这里维护的是「补充要求」，不是整段系统提示词。
+# 硬性规则（金额只能来自工具、无凭证不建单等）写在 skills.py 里，不可配置——
+# 让后台能改这些，等于给了管理员一个关掉风控的开关。
+
+# 预览用的示例状态：让管理员看到补充要求拼进提示词后的真实位置。
+# 用真实账单号，比 dummy 数据更容易看出效果。
+_PROMPT_PREVIEW_STATE: dict[str, Any] = {
+    "state": "validated",
+    "bill_no": "B202610-SF-001",
+    "waybills": ["YD2026100101"],
+    "computed": ["YD2026100101"],
+    "verdict": "fail",
+    "total_delta": 4169.61,
+}
+
+
+def _prompt_payload(supplement: str, meta: dict[str, Any] | None) -> dict[str, Any]:
+    """提示词页与接口共用的返回体，避免两处字段不一致。"""
+    base = skills.build_system_prompt("freight_dispute", _PROMPT_PREVIEW_STATE, "")
+    final = skills.build_system_prompt("freight_dispute", _PROMPT_PREVIEW_STATE, supplement)
+    return {
+        "content": supplement,
+        "meta": meta,
+        "default": auth.DEFAULT_SYSTEM_PROMPT,
+        "max_chars": skills.MAX_SUPPLEMENT_CHARS,
+        "base_preview": base,
+        "final_preview": final,
+        "delta_chars": len(final) - len(base),
+    }
+
+
+@app.get("/admin/prompt")
+async def admin_prompt_page(request: Request,
+                            user: dict[str, Any] = Depends(require_page_admin)):
+    """提示词模板页：编辑补充要求、查看版本历史、恢复旧版本。"""
+    meta = await db.get_setting_meta(auth.SYSTEM_PROMPT_KEY)
+    supplement = (meta or {}).get("value") or ""
+    ctx = _layout_ctx(request, user, "prompt")
+    ctx.update(_prompt_payload(supplement, meta))
+    ctx["revisions"] = await db.list_prompt_revisions(10)
+    return templates.TemplateResponse(request, "admin/prompt.html", ctx)
+
+
+@app.get("/admin/api/prompt")
+async def admin_get_prompt(user: dict[str, Any] = Depends(require_api_admin)):
+    meta = await db.get_setting_meta(auth.SYSTEM_PROMPT_KEY)
+    return _prompt_payload((meta or {}).get("value") or "", meta)
+
+
+@app.put("/admin/api/prompt")
+async def admin_save_prompt(payload: PromptRequest,
+                            user: dict[str, Any] = Depends(require_api_admin)):
+    """
+    保存补充要求。
+
+    允许保存空串——那表示「不加任何补充」，而不是错误。
+    真正需要拦的是超长：每轮请求都会带上这段文本，太长会稀释硬性规则。
+    """
+    content = payload.content.strip()
+    if len(content) > skills.MAX_SUPPLEMENT_CHARS:
+        raise ApiError(1013, status=400)
+
+    await db.set_setting(auth.SYSTEM_PROMPT_KEY, content, updated_by=user["username"])
+    revision_id = await db.save_prompt_revision(content, "save", user["username"])
+    meta = await db.get_setting_meta(auth.SYSTEM_PROMPT_KEY)
+    return {
+        "message": "已保存，下一次提问立即生效",
+        "revision_id": revision_id,
+        **_prompt_payload(content, meta),
+    }
+
+
+@app.post("/admin/api/prompt/restore/{revision_id}")
+async def admin_restore_prompt(revision_id: str,
+                               user: dict[str, Any] = Depends(require_api_admin)):
+    """
+    恢复到某个历史版本。
+
+    恢复本身也是一次「保存」，会再记一条版本——否则回滚后历史就断了，
+    下次再想回到回滚前的内容就找不到了。
+    """
+    revision = await db.get_prompt_revision(revision_id)
+    if not revision:
+        raise ApiError(1023, status=404)
+
+    content = revision["content"] or ""
+    await db.set_setting(auth.SYSTEM_PROMPT_KEY, content, updated_by=user["username"])
+    new_id = await db.save_prompt_revision(content, "restore", user["username"])
+    meta = await db.get_setting_meta(auth.SYSTEM_PROMPT_KEY)
+    return {
+        "message": f"已恢复到 {revision['created_at'][:19].replace('T', ' ')} 的版本",
+        "revision_id": new_id,
+        **_prompt_payload(content, meta),
+    }
+
+
+@app.delete("/admin/api/prompt")
+async def admin_reset_prompt(user: dict[str, Any] = Depends(require_api_admin)):
+    """恢复成内置默认补充要求（不是清空）。"""
+    content = auth.DEFAULT_SYSTEM_PROMPT
+    await db.set_setting(auth.SYSTEM_PROMPT_KEY, content, updated_by=user["username"])
+    revision_id = await db.save_prompt_revision(content, "reset", user["username"])
+    meta = await db.get_setting_meta(auth.SYSTEM_PROMPT_KEY)
+    return {
+        "message": "已恢复默认补充要求",
+        "revision_id": revision_id,
+        **_prompt_payload(content, meta),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 对话审计：页面 + 接口（仅管理员）
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/audit")
+async def admin_audit_page(
+    request: Request,
+    user: dict[str, Any] = Depends(require_page_admin),
+    user_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    days: int = Query(default=7, ge=0, le=3650),
+):
+    """对话审计页：按员工/状态/关键词/时间筛选，展开看每一轮工具调用。"""
+    # 状态值来自地址栏，白名单校验后再下传，避免拼出无意义查询
+    status = status if status in db.AUDIT_STATUSES else None
+    runs = await db.list_audit_runs(user_id, status, q, days, limit=50)
+    ctx = _layout_ctx(request, user, "audit")
+    ctx.update({
+        "runs": runs,
+        "total": await db.count_audit_runs(user_id, status, q, days),
+        "stats": await db.audit_stats(days),
+        "users": await db.list_users(),
+        "statuses": db.AUDIT_STATUSES,
+        "filters": {"user_id": user_id or "", "status": status or "",
+                    "q": q or "", "days": days},
+    })
+    return templates.TemplateResponse(request, "admin/audit.html", ctx)
+
+
+@app.get("/admin/api/audit/runs")
+async def admin_audit_runs(
+    user: dict[str, Any] = Depends(require_api_admin),
+    user_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    days: int = Query(default=7, ge=0, le=3650),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    status = status if status in db.AUDIT_STATUSES else None
+    return {
+        "runs": await db.list_audit_runs(user_id, status, q, days, limit),
+        "total": await db.count_audit_runs(user_id, status, q, days),
+        "stats": await db.audit_stats(days),
+    }
+
+
+@app.get("/admin/api/audit/runs/{run_id}")
+async def admin_audit_run_detail(run_id: str,
+                                 user: dict[str, Any] = Depends(require_api_admin)):
+    """单条执行详情：run 概要 + 每轮 steps（含参数、耗时、摘要）。"""
+    run = await db.get_audit_run(run_id)
+    if not run:
+        raise ApiError(1025, status=404)
+    return {"run": run, "steps": await db.list_steps(run_id)}
+
+
+# ---------------------------------------------------------------------------
+# 日志保留：查看占用、手动清理
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/api/maintenance/retention")
+async def admin_retention_preview(
+    user: dict[str, Any] = Depends(require_api_admin),
+    days: int = Query(default=90, ge=1, le=3650),
+):
+    """只统计不删除：让管理员先看清会清掉多少，再决定是否执行。"""
+    settings = await db.get_retention_settings()
+    return {**await db.purge_logs(days, dry_run=True), "settings": settings}
+
+
+@app.post("/admin/api/maintenance/purge")
+async def admin_purge_logs(
+    user: dict[str, Any] = Depends(require_api_admin),
+    days: int = Query(default=90, ge=1, le=3650),
+):
+    """
+    清理超过保留期的运行日志。
+
+    只动 agent_runs / agent_steps / tool_calls 三张日志表；
+    drafts / validations / messages 属于业务留痕，不在这里删。
+    """
+    result = await db.purge_logs(days, dry_run=False)
+    deleted = sum(result["deleted"].values())
+    return {
+        "message": f"已清理 {deleted} 条早于 {days} 天的运行日志",
+        **result,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 健康检查
 # ---------------------------------------------------------------------------
 
@@ -691,6 +987,23 @@ async def health():
 # ---------------------------------------------------------------------------
 # 登录 / 登出
 # ---------------------------------------------------------------------------
+
+def _cookie_secure(request: Request) -> bool:
+    """
+    决定登录 Cookie 是否加 Secure 标记。
+
+    默认按请求协议自动判断：HTTPS 下自动开启，本地 http 演示不开启，
+    否则浏览器根本不会回传 Cookie，登录会「成功但立刻掉线」。
+    反向代理后面时 request.url.scheme 往往是 http，所以要读
+    X-Forwarded-Proto；需要强制开启/关闭时用 COOKIE_SECURE 覆盖。
+    """
+    flag = os.getenv("COOKIE_SECURE", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    if flag in ("0", "false", "no", "off"):
+        return False
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return proto.split(",")[0].strip().lower() == "https"
 
 def _layout_ctx(request: Request, user: dict[str, Any], active: str) -> dict[str, Any]:
     """后台页面公共上下文：侧边栏、顶栏和底部状态都要用。"""
@@ -758,6 +1071,7 @@ async def login_submit(
         max_age=3600 * 8,
         httponly=True,      # JS 读不到，XSS 也偷不走
         samesite="lax",     # 阻断跨站表单提交携带
+        secure=_cookie_secure(request),
         path="/",
     )
     return response

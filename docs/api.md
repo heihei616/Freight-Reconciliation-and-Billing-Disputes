@@ -36,8 +36,8 @@
 | 1009 | 401 | 用户名或密码不正确 | — |
 | 1010 | 403 | 账号已停用 | — |
 | 1011 | 403 | 需要管理员权限 | 员工访问 /admin |
-| 1012 | 400 | 提示词不能为空 | — |
-| 1013 | 400 | 提示词超过 4000 字 | — |
+| 1012 | 400 | 提示词不能为空 | 保留码；当前版本允许保存空串表示不追加补充 |
+| 1013 | 400 | 提示词超过 2000 字 | 补充要求过长会稀释硬性规则 |
 | 1014 | 400 | 文件无法解析或疑似扫描件 | 需要先 OCR |
 | 1015 | 500 | 索引重建失败 | 看服务日志 |
 | 1016 | 404 | 草稿不存在或无权操作 | 草稿属于别人 |
@@ -47,6 +47,9 @@
 | 1020 | 429 | 提问太频繁 | 触发滑动窗口限流 |
 | 1021 | 429 | 今日问答次数已用完 | 触发每日配额 |
 | 1022 | 429 | 当前排队人数较多 | 并发闸门排队超时 |
+| 1023 | 404 | 提示词版本不存在 | 版本已被清理 |
+| 1024 | 400 | 保留天数不合法 | 需在 1~3650 之间 |
+| 1025 | 404 | 审计记录不存在 | run_id 拼错或日志已清理 |
 | 2001 | 503 | 知识库尚未就绪 | 索引还没建完 |
 | 2002 | 503 | 尚未配置大模型 | 缺 LLM_API_KEY |
 | 3001 | 200 | 检索失败 | 向量服务异常 |
@@ -115,6 +118,27 @@ meta → status* → [state] → (tool_call → tool_result)* → sources
 
 **重复调用是安全的**：服务端把第二次请求判成「已处理」并返回 1018，不会产生第二张草稿。
 
+**状态落在 `pending_confirms` 表**，不在进程内存。所以确认请求打到哪个 worker 都能处理，服务重启也不会让挂在眼前的确认卡变成死按钮——只要还没超过等待时限。
+
+### `GET /api/agent/confirm/pending`
+
+页面刷新或切换会话后重建确认卡。
+
+| 参数 | 位置 | 说明 |
+|---|---|---|
+| `session_id` | query | 必填，必须是当前用户名下的会话 |
+
+```json
+{"confirms": [{
+  "confirm_id": "cf_...", "run_id": "r_...", "tool": "create_dispute_draft",
+  "bill_no": "B202610-SF-001", "dispute_type": "weight", "amount": 4169.61,
+  "issues": [], "total_delta": 4169.61,
+  "statement": "服务端保存的草稿正文", "remain_sec": 142, "created_at": "..."
+}]}
+```
+
+只返回仍在等待时限内的记录；过期的、已确认的、已取消的都不会出现。`remain_sec` 供前端显示倒计时，真正的时限判定仍在 `POST /api/agent/confirm` 里做——前端改时间没有用。
+
 ### 其他员工接口
 
 | 方法 | 路径 | 说明 |
@@ -149,8 +173,50 @@ meta → status* → [state] → (tool_call → tool_result)* → sources
 | POST | `/admin/api/documents` | 上传文档并重建索引；md / markdown / txt / pdf，最大 5MB |
 | DELETE | `/admin/api/documents/{filename}` | 删除文档并重建索引 |
 | POST | `/admin/api/documents/reindex` | 全量重建索引 |
+| GET | `/admin/prompt` | 提示词模板页 |
+| GET | `/admin/api/prompt` | 读取补充要求与生效预览 |
+| PUT | `/admin/api/prompt` | 保存补充要求；JSON `{"content": "..."}`，上限 2000 字 |
+| POST | `/admin/api/prompt/restore/{revision_id}` | 恢复到历史版本，并再记一条版本 |
+| DELETE | `/admin/api/prompt` | 恢复内置默认补充要求 |
+| GET | `/admin/audit` | 对话审计页；支持 `user_id`、`status`、`q`、`days` 筛选 |
+| GET | `/admin/api/audit/runs` | 执行记录列表；`days=0` 表示不限时间，`limit` 最大 200 |
+| GET | `/admin/api/audit/runs/{run_id}` | 单次执行详情：run 概要 + 每轮 steps |
+| GET | `/admin/api/maintenance/retention?days=90` | 清理预演，只统计不删除 |
+| POST | `/admin/api/maintenance/purge?days=90` | 清理超过保留期的运行日志 |
 
 上传扫描件或无法抽取文本的 PDF 会返回 1014，不会静默入库。
+
+### 提示词接口的边界
+
+`system_prompt` 存的是**补充要求**，不是整段提示词。服务端把它追加到
+`skills.build_system_prompt()` 生成的提示词末尾，并在段首声明「与硬性规则冲突时以硬性规则为准」。
+硬性规则（金额只能来自工具、无凭证不建单、提交必须人工确认）不可通过接口修改，
+所以即使管理员误填「直接建单不用确认」，服务端的工具前置条件与中断逻辑仍会拦住。
+
+`GET /admin/api/prompt` 的返回示例：
+
+```json
+{
+  "content": "- 称呼统一用「你」，不用「您」。",
+  "meta": {"key": "system_prompt", "updated_by": "admin", "updated_at": "2026-11-05T21:16:31+08:00"},
+  "max_chars": 2000,
+  "base_preview": "你是公司物流费对账与计费争议助手……",
+  "final_preview": "……## 管理员补充要求（仅影响表达与业务口径）",
+  "delta_chars": 137
+}
+```
+
+### 审计查询参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `user_id` | 空 | 按员工 ID 过滤，来自 `/admin/audit` 的下拉框 |
+| `status` | 空 | `running` / `awaiting_confirm` / `done` / `error` / `capped` / `cancelled`，非法值按空处理 |
+| `q` | 空 | 模糊匹配问题内容、`run_id`、`session_id` |
+| `days` | 7 | 只看最近 N 天；`0` 表示不限 |
+| `limit` | 50 | 仅列表接口，1~200 |
+
+关键词与员工 ID 全部走 SQL 参数占位符，不做字符串拼接。
 
 ## 调用示例
 

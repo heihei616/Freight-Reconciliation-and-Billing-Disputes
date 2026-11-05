@@ -124,6 +124,10 @@ jobs:
           cat server.log
           test "$code" = "200"
 
+      - name: 确认接口自检
+        # 不调用模型：直接往库里放一条待确认记录，验证「查询 → 确认 → 再查为空 → 重复 409」
+        run: python scripts/check_confirm_api.py
+
       - name: 失败时上传日志
         if: failure()
         uses: actions/upload-artifact@v4

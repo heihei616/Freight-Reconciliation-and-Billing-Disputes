@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block title %}对话审计{% endblock %}
+{% block heading %}对话审计{% endblock %}
+
+{% block content %}
+<div class="alert info">
+  每一次提问都会生成一条执行记录（run），下面展开可见每一轮调用了哪个工具、参数是什么、
+  耗时多久、结果摘要与失败原因。日志按 <span class="mono">LOG_RETENTION_DAYS</span> 定期清理，
+  业务单据（草稿、校验凭证）不受影响。
+</div>
+
+<div class="stats">
+  <div class="stat">
+    <div class="label">执行次数</div>
+    <div class="value">{{ stats.total }}</div>
+    <div class="hint">近 {{ stats.days }} 天</div>
+  </div>
+  <div class="stat">
+    <div class="label">失败率</div>
+    <div class="value">{{ stats.error_rate }}%</div>
+    <div class="hint">失败 {{ stats.failed }} 次</div>
+  </div>
+  <div class="stat">
+    <div class="label">平均耗时</div>
+    <div class="value">{{ '%.1f'|format(stats.avg_ms / 1000) }}s</div>
+    <div class="hint">含模型决策与工具执行</div>
+  </div>
+  <div class="stat">
+    <div class="label">触发人工确认</div>
+    <div class="value">{{ stats.confirmed }}</div>
+    <div class="hint">建单前中断的次数</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>筛选</h2>
+      <p>共匹配 {{ total }} 条，最多展示最近 50 条</p>
+    </div>
+  </div>
+  <div class="card-body">
+    <form method="get" action="/admin/audit"
+          style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+      <div class="field" style="margin:0;min-width:150px">
+        <label for="user_id">员工</label>
+        <select id="user_id" name="user_id">
+          <option value="">全部</option>
+          {% for item in users %}
+          <option value="{{ item.id }}" {% if filters.user_id == item.id %}selected{% endif %}>
+            {{ item.display_name }}（{{ item.username }}）
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="margin:0;min-width:140px">
+        <label for="status">状态</label>
+        <select id="status" name="status">
+          <option value="">全部</option>
+          {% for item in statuses %}
+          <option value="{{ item }}" {% if filters.status == item %}selected{% endif %}>{{ item }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="margin:0;min-width:130px">
+        <label for="days">时间范围</label>
+        <select id="days" name="days">
+          <option value="1" {% if filters.days == 1 %}selected{% endif %}>近 1 天</option>
+          <option value="7" {% if filters.days == 7 %}selected{% endif %}>近 7 天</option>
+          <option value="30" {% if filters.days == 30 %}selected{% endif %}>近 30 天</option>
+          <option value="0" {% if filters.days == 0 %}selected{% endif %}>全部</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0;flex:1;min-width:200px">
+        <label for="q">关键词</label>
+        <input type="text" id="q" name="q" value="{{ filters.q }}"
+               placeholder="问题内容、run_id 或会话号">
+      </div>
+      <button class="btn" type="submit">查询</button>
+      <a class="btn ghost" href="/admin/audit">重置</a>
+    </form>
+  </div>
+</div>
+
+{% if stats.tools %}
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>工具调用分布</h2>
+      <p>按调用次数排序，用于发现慢工具与高频失败点</p>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr><th>工具</th><th style="width:110px">调用次数</th>
+          <th style="width:120px">平均耗时</th><th style="width:100px">失败</th></tr>
+    </thead>
+    <tbody>
+      {% for tool in stats.tools %}
+      <tr>
+        <td class="mono">{{ tool.tool_name }}</td>
+        <td>{{ tool.calls }}</td>
+        <td>{{ '%.0f'|format(tool.avg_ms or 0) }} ms</td>
+        <td>
+          {% if tool.failures %}
+          <span class="tag danger">{{ tool.failures }}</span>
+          {% else %}<span class="tag ok">0</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>执行记录</h2>
+      <p>点击「轨迹」展开每一轮决策，或按 run_id 到接口里取完整 JSON</p>
+    </div>
+  </div>
+  {% if runs %}
+  <table>
+    <thead>
+      <tr>
+        <th style="width:150px">开始时间</th>
+        <th style="width:110px">员工</th>
+        <th>问题</th>
+        <th style="width:120px">能力包</th>
+        <th style="width:80px">轮次</th>
+        <th style="width:80px">工具</th>
+        <th style="width:80px">耗时</th>
+        <th style="width:100px">状态</th>
+        <th style="width:70px">轨迹</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td class="mono">{{ run.started_at[:19].replace('T', ' ') }}</td>
+        <td>{{ run.display_name }}</td>
+        <td>{{ run.question[:60] }}{% if run.question | length > 60 %}…{% endif %}</td>
+        <td class="mono">{{ run.skill or '-' }}</td>
+        <td>{{ run.rounds }}</td>
+        <td>{{ run.tool_calls }}</td>
+        <td>{% if run.elapsed_ms is not none %}{{ '%.1f'|format(run.elapsed_ms / 1000) }}s{% else %}-{% endif %}</td>
+        <td>
+          {% if run.status == 'done' %}<span class="tag ok">完成</span>
+          {% elif run.status == 'error' %}<span class="tag danger">失败</span>
+          {% elif run.status == 'awaiting_confirm' %}<span class="tag warn">待确认</span>
+          {% elif run.status == 'capped' %}<span class="tag warn">超轮次</span>
+          {% elif run.status == 'cancelled' %}<span class="tag gray">连接中断</span>
+          {% else %}<span class="tag gray">{{ run.status }}</span>{% endif %}
+        </td>
+        <td>
+          <button class="btn ghost sm" type="button" data-run="{{ run.id }}">展开</button>
+        </td>
+      </tr>
+      <tr hidden data-detail="{{ run.id }}">
+        <td colspan="9" style="background:#fbfdff;padding:0">
+          <div style="padding:14px 18px">
+            <div class="muted" style="margin-bottom:8px">
+              run_id <span class="mono">{{ run.id }}</span> ·
+              会话 <span class="mono">{{ run.session_id }}</span>
+              {% if run.error %}<br><span style="color:var(--danger)">错误：{{ run.error }}</span>{% endif %}
+            </div>
+            <div class="detail-body"><div class="loading muted">加载中…</div></div>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">这个条件下没有执行记录。换一个时间范围或清空筛选试试。</div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+
+  const cache = new Map();
+
+  function esc(text) {
+    const div = document.createElement("div");
+    div.textContent = text == null ? "" : String(text);
+    return div.innerHTML;
+  }
+
+  async function loadRun(runId) {
+    const response = await fetch(`/admin/api/audit/runs/${encodeURIComponent(runId)}`);
+    let payload = null;
+    try { payload = await response.json(); } catch (_) { /* 忽略非 JSON */ }
+    if (!response.ok) {
+      throw new Error((payload && payload.message) || `请求失败（HTTP ${response.status}）`);
+    }
+    return payload;
+  }
+
+  /** 把一轮里的工具参数压成一行，避免长 JSON 撑破表格。 */
+  function argsLine(args) {
+    if (!args || !Object.keys(args).length) return "";
+    return Object.keys(args).map((key) => {
+      let value = args[key];
+      if (value && typeof value === "object") value = JSON.stringify(value);
+      const text = String(value);
+      return `${key}=${text.length > 40 ? text.slice(0, 40) + "…" : text}`;
+    }).join("，");
+  }
+
+  function renderSteps(steps) {
+    if (!steps.length) return '<div class="muted">这条记录没有工具调用（纯文本回答）。</div>';
+    const rows = steps.map((step) => {
+      const kind = step.kind === "confirm"
+        ? '<span class="tag warn">人工确认</span>'
+        : '<span class="tag info">工具</span>';
+      const ok = step.ok
+        ? '<span class="tag ok">成功</span>'
+        : `<span class="tag danger">${esc(step.error_code || "失败")}</span>`;
+      return `<tr>
+        <td class="mono">${step.round}</td>
+        <td>${kind}</td>
+        <td class="mono">${esc(step.tool_name || "-")}</td>
+        <td class="muted" style="max-width:340px;word-break:break-all">${esc(argsLine(step.tool_args)) || "-"}</td>
+        <td>${step.duration_ms == null ? "-" : Math.round(step.duration_ms) + " ms"}</td>
+        <td>${ok}</td>
+        <td class="muted" style="max-width:320px">${esc(step.result_summary || "-")}</td>
+      </tr>`;
+    }).join("");
+    return `<table style="background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden">
+      <thead><tr>
+        <th style="width:60px">轮次</th><th style="width:100px">类型</th>
+        <th style="width:170px">工具</th><th>参数</th>
+        <th style="width:90px">耗时</th><th style="width:90px">结果</th>
+        <th style="width:260px">摘要</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+
+  async function toggle(button) {
+    const runId = button.dataset.run;
+    const row = document.querySelector(`tr[data-detail="${runId}"]`);
+    if (!row) return;
+    if (!row.hidden) {
+      row.hidden = true;
+      button.textContent = "展开";
+      return;
+    }
+    row.hidden = false;
+    button.textContent = "收起";
+
+    const body = row.querySelector(".detail-body");
+    if (!body) return;
+    if (cache.has(runId)) {
+      body.innerHTML = cache.get(runId);
+      return;
+    }
+    try {
+      const data = await loadRun(runId);
+      const html = renderSteps(data.steps || []);
+      cache.set(runId, html);
+      body.innerHTML = html;
+    } catch (error) {
+      body.className = "detail-body alert danger";
+      body.textContent = error.message;
+    }
+  }
+
+  document.querySelectorAll("[data-run]").forEach((button) => {
+    button.addEventListener("click", () => toggle(button));
+  });
+})();
+</script>
+{% endblock %}

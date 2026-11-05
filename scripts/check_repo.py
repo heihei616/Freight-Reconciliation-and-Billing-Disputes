@@ -31,7 +31,7 @@ from logistics_agent.utils.masking import scan_for_secrets  # noqa: E402
 CODE_DIRS = ("src", "tests", "examples", "scripts")
 REQUIRED_FILES = (
     "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
-    ".gitignore", ".editorconfig", ".env.example",
+    ".gitignore", ".gitattributes", ".editorconfig", ".env.example",
     "requirements.txt", "requirements-dev.txt", "pyproject.toml",
     "config/default.yaml", "Makefile", ".pre-commit-config.yaml",
     "scripts/check_repo.py", "scripts/check_docs.py", "scripts/check_cases.py",
@@ -177,6 +177,36 @@ def check_env_example_keys() -> None:
     stats["env_keys"] = len(used)
 
 
+def check_version_consistency() -> None:
+    """
+    版本号在 pyproject.toml、包内 __version__、CHANGELOG 三处必须一致。
+
+    这三处不同步是开源项目最常见的低级问题：装出来的包显示旧版本，
+    更新记录里却已经发了新版，排查线上问题时会先被版本号误导。
+    """
+    pyproject = ROOT / "pyproject.toml"
+    init_py = ROOT / "src" / "logistics_agent" / "__init__.py"
+    changelog = ROOT / "CHANGELOG.md"
+    if not (pyproject.exists() and init_py.exists()):
+        return
+
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
+    if not match:
+        fail("pyproject.toml 里找不到 version")
+        return
+    version = match.group(1)
+
+    code_match = re.search(r'__version__\s*=\s*"([^"]+)"', init_py.read_text(encoding="utf-8"))
+    if not code_match or code_match.group(1) != version:
+        fail(f"包内 __version__={code_match.group(1) if code_match else '缺失'} 与 pyproject {version} 不一致")
+
+    if changelog.exists():
+        text = changelog.read_text(encoding="utf-8")
+        if f"## [{version}]" not in text:
+            warn(f"CHANGELOG 里没有 {version} 的条目")
+    stats["version"] = version
+
+
 def check_test_suite() -> None:
     tests = list((ROOT / "tests").glob("test_*.py"))
     if not tests:
@@ -196,6 +226,7 @@ def main() -> int:
     check_sensitive_files()
     check_python_files()
     check_env_example_keys()
+    check_version_consistency()
     check_test_suite()
 
     print("=" * 64)
@@ -206,6 +237,7 @@ def main() -> int:
     print(f"测试文件：{stats.get('test_files', 0)} 个，"
           f"用例 {stats.get('test_cases', 0)} 条")
     print(f"环境变量：代码读取 {stats.get('env_keys', 0)} 个")
+    print(f"版本号：{stats.get('version', '-')}（pyproject / __version__ / CHANGELOG 已同步）")
 
     if warnings:
         print(f"\n警告 {len(warnings)} 条（不阻塞）：")
