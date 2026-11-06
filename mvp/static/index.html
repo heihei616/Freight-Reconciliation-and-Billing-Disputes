@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="物流费对账与计费争议轻量 MVP">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23167d74'/%3E%3Cpath d='M18 17h28v7H18zm0 12h28v7H18zm0 12h18v7H18z' fill='white'/%3E%3C/svg%3E">
+  <title>物流费对账助手 · MVP</title>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --text: #18212b;
+      --muted: #687482;
+      --line: #e4e8ed;
+      --accent: #167d74;
+      --accent-soft: #e9f5f2;
+      --danger: #bf3f46;
+      --danger-soft: #fff1f1;
+      --success: #27745a;
+      --success-soft: #edf7f1;
+      --warning: #95651e;
+      --shadow: 0 8px 28px rgba(23, 37, 51, .06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      font-size: 14px;
+    }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    .topbar {
+      height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 0 24px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      color: #fff;
+      background: var(--accent);
+      font-weight: 800;
+      font-size: 18px;
+    }
+    .brand h1 { margin: 0; font-size: 17px; letter-spacing: .02em; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .mvp-badge {
+      padding: 3px 7px;
+      border-radius: 5px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .top-note { color: var(--muted); font-size: 12px; text-align: right; }
+    .workspace {
+      display: grid;
+      grid-template-columns: 264px minmax(440px, 1fr) 330px;
+      gap: 16px;
+      padding: 16px;
+      height: calc(100vh - 66px);
+    }
+    .panel {
+      min-width: 0;
+      overflow: auto;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      box-shadow: var(--shadow);
+    }
+    .side-panel { padding: 16px 12px; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 0 4px 12px;
+    }
+    .section-head h2, .section-head h3 { margin: 0; font-size: 14px; }
+    .section-head span { color: var(--muted); font-size: 12px; }
+    .bill-list { display: grid; gap: 9px; }
+    .bill-item {
+      width: 100%;
+      padding: 13px;
+      text-align: left;
+      color: var(--text);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      transition: border-color .15s, background .15s;
+    }
+    .bill-item:hover { border-color: #9fb9b5; }
+    .bill-item.active { border-color: var(--accent); background: #f4faf8; }
+    .bill-top, .bill-meta, .amount-line, .issue-head, .draft-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .bill-carrier { font-weight: 700; }
+    .bill-no { margin: 8px 0; color: #3f4c59; font-size: 12px; word-break: break-all; }
+    .bill-meta { color: var(--muted); font-size: 12px; }
+    .tag {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 7px;
+      border-radius: 5px;
+      color: var(--muted);
+      background: #f0f2f4;
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .tag.fail { color: var(--danger); background: var(--danger-soft); }
+    .tag.pass, .tag.confirmed { color: var(--success); background: var(--success-soft); }
+    .tag.pending { color: var(--warning); background: #fff6e7; }
+    .draft-section { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .empty { padding: 20px 6px; color: var(--muted); text-align: center; font-size: 12px; }
+    .draft-item {
+      width: 100%;
+      margin-bottom: 8px;
+      padding: 11px;
+      text-align: left;
+      color: var(--text);
+      background: #fafbfb;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+    }
+    .draft-item small { display: block; margin-top: 7px; color: var(--muted); }
+    .main-panel { padding: 22px; }
+    .bill-heading { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+    .eyebrow { margin: 0 0 7px; color: var(--accent); font-size: 12px; font-weight: 750; }
+    .bill-heading h2 { margin: 0; font-size: 20px; word-break: break-all; }
+    .subline { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    .charged-total { flex: none; text-align: right; }
+    .charged-total span { display: block; color: var(--muted); font-size: 12px; }
+    .charged-total strong { display: block; margin-top: 4px; font-size: 22px; }
+    .verdict {
+      margin: 20px 0;
+      padding: 17px 18px;
+      border: 1px solid;
+      border-radius: 11px;
+    }
+    .verdict.fail { color: var(--danger); background: var(--danger-soft); border-color: #f1cccc; }
+    .verdict.pass { color: var(--success); background: var(--success-soft); border-color: #cde7d9; }
+    .verdict.warn { color: var(--warning); background: #fff8e9; border-color: #eddbb7; }
+    .verdict-line { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    .verdict-title { font-weight: 750; }
+    .verdict p { margin: 8px 0 0; color: #4e5965; line-height: 1.65; font-size: 13px; }
+    .delta { flex: none; font-size: 26px; font-weight: 800; letter-spacing: -.02em; }
+    .delta small { display: block; margin-bottom: 3px; font-size: 11px; font-weight: 500; text-align: right; }
+    .primary {
+      padding: 10px 16px;
+      color: #fff;
+      background: var(--accent);
+      border: 0;
+      border-radius: 8px;
+      font-weight: 700;
+    }
+    .primary:hover { background: #116a62; }
+    .secondary {
+      padding: 10px 16px;
+      color: #35414d;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .verdict .primary { margin-top: 13px; }
+    .content-section { margin-top: 22px; }
+    .content-section h3 { margin: 0 0 12px; font-size: 15px; }
+    .issue-card { margin-bottom: 11px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; }
+    .issue-title { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-weight: 750; }
+    .issue-delta { flex: none; color: var(--danger); font-size: 17px; font-weight: 800; }
+    .issue-explain { margin: 11px 0; color: #3e4a56; line-height: 1.65; }
+    .amount-line { flex-wrap: wrap; justify-content: flex-start; gap: 18px; color: var(--muted); font-size: 12px; }
+    .amount-line strong { color: #35414d; }
+    details { margin-top: 12px; }
+    summary { color: var(--accent); cursor: pointer; font-size: 12px; font-weight: 650; }
+    .steps { margin: 10px 0 0; padding: 12px 12px 12px 30px; color: #53606d; background: #f7f9fa; border-radius: 8px; font-size: 12px; line-height: 1.8; }
+    .policy-card { margin-bottom: 9px; padding: 13px; background: #f7f9fa; border-radius: 9px; }
+    .policy-card strong { display: block; margin-bottom: 6px; font-size: 12px; }
+    .policy-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+    .all-rows { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12px; }
+    .all-rows th, .all-rows td { padding: 10px 7px; border-bottom: 1px solid var(--line); text-align: right; }
+    .all-rows th:first-child, .all-rows td:first-child, .all-rows th:nth-child(2), .all-rows td:nth-child(2) { text-align: left; }
+    .all-rows th { color: var(--muted); font-weight: 600; }
+    .qa-panel { display: flex; flex-direction: column; padding: 16px; }
+    .qa-intro { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .messages { flex: 1; min-height: 180px; overflow: auto; }
+    .message { margin-bottom: 12px; padding: 12px; border-radius: 10px; line-height: 1.7; font-size: 13px; white-space: pre-wrap; }
+    .message.assistant { background: #f3f6f7; border-top-left-radius: 3px; }
+    .message.user { margin-left: 28px; color: #fff; background: var(--accent); border-top-right-radius: 3px; }
+    .citations { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+    .citation { padding: 3px 6px; color: var(--accent); background: var(--accent-soft); border-radius: 4px; font-size: 10px; }
+    .quick-title { margin: 8px 0; color: var(--muted); font-size: 11px; }
+    .quick-list { display: grid; gap: 6px; }
+    .quick {
+      padding: 8px 10px;
+      text-align: left;
+      color: #45515d;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      font-size: 12px;
+    }
+    .quick:hover { color: var(--accent); border-color: #a9c9c4; }
+    .ask-form { display: flex; gap: 7px; margin-top: 13px; }
+    .ask-form input {
+      min-width: 0;
+      flex: 1;
+      padding: 10px 11px;
+      border: 1px solid #d7dde3;
+      border-radius: 8px;
+      outline: none;
+    }
+    .ask-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .ask-form button { padding: 9px 13px; }
+    .foot-note { margin: 12px 0 0; color: #8a939c; font-size: 10px; text-align: center; }
+    .loading { padding: 40px 10px; color: var(--muted); text-align: center; }
+    dialog {
+      width: min(650px, calc(100vw - 32px));
+      max-height: calc(100vh - 50px);
+      padding: 0;
+      border: 0;
+      border-radius: 14px;
+      box-shadow: 0 25px 80px rgba(0, 0, 0, .25);
+    }
+    dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+    dialog::backdrop { background: rgba(20, 29, 37, .45); }
+    .dialog-head { flex: none; display: flex; justify-content: space-between; gap: 16px; padding: 20px 22px; border-bottom: 1px solid var(--line); }
+    .dialog-head h2 { margin: 0; font-size: 18px; }
+    .dialog-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .icon-button { padding: 3px 8px; color: var(--muted); background: transparent; border: 0; font-size: 22px; }
+    .dialog-body { flex: 1; min-height: 0; padding: 20px 22px; overflow: auto; }
+    .draft-amount { margin-bottom: 15px; padding: 13px; color: var(--danger); background: var(--danger-soft); border-radius: 9px; font-size: 22px; font-weight: 800; }
+    .draft-body { margin: 0; color: #3f4b57; font: 13px/1.8 Inter, "PingFang SC", "Microsoft YaHei", sans-serif; white-space: pre-wrap; }
+    .dialog-actions { flex: none; display: flex; justify-content: flex-end; gap: 9px; padding: 16px 22px; border-top: 1px solid var(--line); }
+    .toast {
+      position: fixed;
+      z-index: 20;
+      left: 50%;
+      bottom: 25px;
+      max-width: min(560px, calc(100vw - 30px));
+      padding: 11px 17px;
+      color: #fff;
+      background: #26333f;
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      transform: translateX(-50%);
+    }
+    .toast.error { background: #91383e; }
+    [hidden] { display: none !important; }
+    @media (max-width: 1120px) {
+      body { overflow: auto; }
+      .workspace { height: auto; grid-template-columns: 240px minmax(0, 1fr); }
+      .panel { max-height: none; }
+      .qa-panel { grid-column: 1 / -1; min-height: 480px; }
+    }
+    @media (max-width: 760px) {
+      .topbar { height: auto; padding: 14px 16px; }
+      .top-note { display: none; }
+      .workspace { grid-template-columns: 1fr; padding: 10px; }
+      .main-panel { padding: 16px; }
+      .bill-heading, .verdict-line { flex-direction: column; }
+      .charged-total { text-align: left; }
+      .delta small { text-align: left; }
+      .qa-panel { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">账</div>
+      <div>
+        <h1>物流费对账助手 <span class="mvp-badge">MVP</span></h1>
+        <p>制度问答 × 确定性核账 × 人工确认</p>
+      </div>
+    </div>
+    <div class="top-note">金额由 domain.py 统一计算 · 争议单须人工确认<br>本地演示，不调用模型、不执行财务过账</div>
+  </header>
+
+  <div class="workspace">
+    <aside class="panel side-panel" aria-label="账单与草稿">
+      <div class="section-head"><h2>待核对账单</h2><span id="billCount">载入中</span></div>
+      <div id="billList" class="bill-list"><div class="loading">正在读取账单…</div></div>
+      <section class="draft-section">
+        <div class="section-head"><h3>最近争议草稿</h3><span id="draftCount">0</span></div>
+        <div id="draftList"><div class="empty">暂无草稿</div></div>
+      </section>
+    </aside>
+
+    <main id="auditPanel" class="panel main-panel" aria-live="polite">
+      <div class="loading">正在准备核对结果…</div>
+    </main>
+
+    <aside class="panel qa-panel" aria-label="制度问答">
+      <div class="section-head"><h2>制度问答</h2><span>附条款出处</span></div>
+      <p class="qa-intro">回答来自本地制度检索与当前账单事实；未命中时会明确说不知道。</p>
+      <div id="messages" class="messages"></div>
+      <div class="quick-title">快速提问</div>
+      <div id="quickList" class="quick-list"></div>
+      <form id="askForm" class="ask-form">
+        <input id="questionInput" maxlength="500" autocomplete="off" placeholder="输入制度或账单问题" aria-label="输入问题">
+        <button id="askButton" class="primary" type="submit">提问</button>
+      </form>
+      <p class="foot-note">轻量关键词检索，不生成未经制度支持的结论</p>
+    </aside>
+  </div>
+
+  <dialog id="draftDialog" aria-labelledby="draftDialogTitle">
+    <div class="dialog-head">
+      <div><h2 id="draftDialogTitle">确认争议草稿</h2><p id="draftDialogMeta"></p></div>
+      <button id="dialogClose" class="icon-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="dialog-body">
+      <div id="draftAmount" class="draft-amount"></div>
+      <div id="draftStatus"></div>
+      <pre id="draftBody" class="draft-body"></pre>
+    </div>
+    <div class="dialog-actions">
+      <button id="cancelDraft" class="secondary" type="button">取消草稿</button>
+      <button id="confirmDraft" class="primary" type="button">确认提交复核</button>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script>
+    "use strict";
+    const state = { bills: [], audits: {}, current: null, audit: null, drafts: [], activeDraft: null };
+    const byId = (id) => document.getElementById(id);
+
+    function node(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined && text !== null) element.textContent = String(text);
+      return element;
+    }
+
+    function money(value, signed = false) {
+      const number = Number(value || 0);
+      const prefix = number < 0 ? "-" : (signed && number > 0 ? "+" : "");
+      return prefix + "¥" + Math.abs(number).toLocaleString("zh-CN", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+    }
+
+    function plainAmount(value) {
+      return Number(value || 0).toLocaleString("zh-CN", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+    }
+
+    let toastTimer;
+    function toast(message, isError = false) {
+      const item = byId("toast");
+      item.textContent = message;
+      item.classList.toggle("error", isError);
+      item.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { item.hidden = true; }, 3200);
+    }
+
+    async function api(path, options = {}) {
+      const request = { ...options, headers: { ...(options.headers || {}) } };
+      if (request.body) request.headers["Content-Type"] = "application/json";
+      const response = await fetch(path, request);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || data.message || `请求失败（${response.status}）`);
+      return data;
+    }
+
+    function verdictTag(result) {
+      if (!result) return node("span", "tag", "待核对");
+      const text = result.verdict === "fail" ? `${result.issues.length} 处差异` :
+        (result.verdict === "pass" ? "核对通过" : "需复核");
+      return node("span", `tag ${result.verdict}`, text);
+    }
+
+    function renderBills() {
+      byId("billCount").textContent = `${state.bills.length} 张`;
+      const list = byId("billList");
+      list.replaceChildren();
+      state.bills.forEach((bill) => {
+        const button = node("button", `bill-item${state.current === bill.bill_no ? " active" : ""}`);
+        button.type = "button";
+        button.setAttribute("aria-label", `核对账单 ${bill.bill_no}`);
+        const top = node("div", "bill-top");
+        top.append(node("span", "bill-carrier", bill.carrier), verdictTag(state.audits[bill.bill_no]));
+        const number = node("div", "bill-no", bill.bill_no);
+        const meta = node("div", "bill-meta");
+        meta.append(node("span", "", bill.period), node("strong", "", money(bill.total_amount)));
+        button.append(top, number, meta);
+        button.addEventListener("click", () => selectBill(bill.bill_no));
+        list.append(button);
+      });
+    }
+
+    function statusLabel(status) {
+      return { pending: "待确认", confirmed: "已确认", cancelled: "已取消" }[status] || status;
+    }
+
+    function renderDrafts() {
+      byId("draftCount").textContent = String(state.drafts.length);
+      const list = byId("draftList");
+      list.replaceChildren();
+      if (!state.drafts.length) {
+        list.append(node("div", "empty", "暂无草稿"));
+        return;
+      }
+      state.drafts.forEach((draft) => {
+        const button = node("button", "draft-item");
+        button.type = "button";
+        const top = node("div", "draft-top");
+        top.append(node("strong", "", draft.draft_id), node("span", `tag ${draft.status}`, statusLabel(draft.status)));
+        const detail = node("small", "", `${draft.bill_no} · ${money(draft.amount)}`);
+        button.append(top, detail);
+        button.addEventListener("click", () => openDraft(draft));
+        list.append(button);
+      });
+    }
+
+    function issueCard(issue) {
+      const card = node("article", "issue-card");
+      const head = node("div", "issue-head");
+      const title = node("div", "issue-title");
+      title.append(
+        node("span", "", `第 ${issue.line_no} 行`),
+        node("span", "tag", issue.waybill_no),
+        node("span", "tag fail", issue.label),
+        node("span", "tag", issue.policy.id)
+      );
+      head.append(title, node("span", "issue-delta", money(issue.delta, true)));
+      const explain = node("p", "issue-explain", issue.explain);
+      const amounts = node("div", "amount-line");
+      const charged = node("span", "", "账单金额 ");
+      charged.append(node("strong", "", money(issue.charged)));
+      const expected = node("span", "", "应收金额 ");
+      expected.append(node("strong", "", money(issue.expected)));
+      amounts.append(charged, expected);
+      if (issue.rule_version) amounts.append(node("span", "", issue.rule_version));
+      const details = node("details");
+      details.append(node("summary", "", "查看复算过程"));
+      const steps = node("ol", "steps");
+      issue.steps.forEach((step) => steps.append(node("li", "", step)));
+      details.append(steps);
+      card.append(head, explain, amounts, details);
+      return card;
+    }
+
+    function policySection(result) {
+      const section = node("section", "content-section");
+      section.append(node("h3", "", "制度依据"));
+      result.citations.forEach((policy) => {
+        const card = node("article", "policy-card");
+        card.append(node("strong", "", `${policy.id} · ${policy.title}`), node("p", "", policy.text));
+        section.append(card);
+      });
+      return section;
+    }
+
+    function allRowsSection(result) {
+      const section = node("section", "content-section");
+      const details = node("details");
+      details.append(node("summary", "", `查看全部 ${result.checked_lines} 行核对明细`));
+      const table = node("table", "all-rows");
+      const thead = node("thead");
+      const header = node("tr");
+      ["行", "运单号", "账单金额", "应收金额", "差额"].forEach((label) => header.append(node("th", "", label)));
+      thead.append(header);
+      const tbody = node("tbody");
+      const rowsByLine = new Map(result.rows.map((row) => [row.line_no, row]));
+      const issuesByLine = new Map(result.issues.map((issue) => [issue.line_no, issue]));
+      const lineNumbers = [...new Set([...rowsByLine.keys(), ...issuesByLine.keys()])].sort((a, b) => a - b);
+      lineNumbers.forEach((lineNo) => {
+        const row = rowsByLine.get(lineNo) || issuesByLine.get(lineNo);
+        const tr = node("tr");
+        [row.line_no, row.waybill_no, money(row.charged), money(row.expected), money(row.delta, true)]
+          .forEach((value) => tr.append(node("td", "", value)));
+        tbody.append(tr);
+      });
+      table.append(thead, tbody);
+      details.append(table);
+      section.append(details);
+      return section;
+    }
+
+    function renderAudit() {
+      const result = state.audit;
+      const panel = byId("auditPanel");
+      panel.replaceChildren();
+      if (!result) {
+        panel.append(node("div", "loading", "请选择左侧账单"));
+        return;
+      }
+      const heading = node("div", "bill-heading");
+      const identity = node("div");
+      identity.append(
+        node("p", "eyebrow", `${result.carrier} · ${result.period} 账期`),
+        node("h2", "", result.bill_no),
+        node("p", "subline", `出账日期 ${result.issued_at} · 共 ${result.checked_lines} 行`)
+      );
+      const total = node("div", "charged-total");
+      total.append(node("span", "", "账单总额"), node("strong", "", money(result.charged_total)));
+      heading.append(identity, total);
+      panel.append(heading);
+
+      const verdict = node("section", `verdict ${result.verdict}`);
+      const line = node("div", "verdict-line");
+      const textWrap = node("div");
+      textWrap.append(node("div", "verdict-title", `${result.verdict_label}，发现 ${result.issues.length} 处差异`));
+      const delta = node("div", "delta");
+      delta.append(node("small", "", "合计多收金额"), document.createTextNode(money(result.total_delta, true)));
+      line.append(textWrap, delta);
+      verdict.append(line, node("p", "", `${result.summary} 金额已按合同价目与运单事实逐行复算。`));
+      if (result.verdict === "fail") {
+        const button = node("button", "primary", "生成争议单");
+        button.type = "button";
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            const draft = await api("/api/drafts", {
+              method: "POST",
+              body: JSON.stringify({ bill_no: result.bill_no })
+            });
+            upsertDraft(draft);
+            openDraft(draft);
+          } catch (error) {
+            toast(error.message, true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+        verdict.append(button);
+      }
+      panel.append(verdict);
+
+      const issueSection = node("section", "content-section");
+      issueSection.append(node("h3", "", result.issues.length ? "差异明细" : "核对结论"));
+      if (result.issues.length) {
+        result.issues.forEach((issue) => issueSection.append(issueCard(issue)));
+      } else {
+        issueSection.append(node("p", "issue-explain", "所有计费行的账单金额与确定性复算结果一致。"));
+      }
+      panel.append(issueSection, allRowsSection(result), policySection(result));
+      panel.scrollTop = 0;
+    }
+
+    async function selectBill(billNo) {
+      state.current = billNo;
+      renderBills();
+      byId("auditPanel").replaceChildren(node("div", "loading", "正在逐行复算…"));
+      try {
+        state.audit = state.audits[billNo] || await api("/api/audit", {
+          method: "POST",
+          body: JSON.stringify({ bill_no: billNo })
+        });
+        state.audits[billNo] = state.audit;
+        renderAudit();
+        resetConversation();
+      } catch (error) {
+        byId("auditPanel").replaceChildren(node("div", "loading", error.message));
+        toast(error.message, true);
+      }
+    }
+
+    function appendMessage(role, text, citations = []) {
+      const message = node("div", `message ${role}`, text);
+      if (citations.length) {
+        const list = node("div", "citations");
+        citations.forEach((policy) => {
+          const chip = node("span", "citation", `${policy.id} ${policy.title}`);
+          chip.title = policy.text;
+          list.append(chip);
+        });
+        message.append(list);
+      }
+      byId("messages").append(message);
+      message.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return message;
+    }
+
+    function resetConversation() {
+      byId("messages").replaceChildren();
+      const result = state.audit;
+      appendMessage("assistant", result ?
+        `已载入 ${result.bill_no}。你可以追问差额原因、争议额度或称重单规则，我会同时给出制度出处。` :
+        "请先选择一张账单。");
+      const quick = byId("quickList");
+      quick.replaceChildren();
+      const questions = [
+        result && result.verdict === "fail" ? "为什么这张账单多了钱？" : "这张账单的核对结果怎么样？",
+        "争议额度还剩多少？",
+        "称重单要满足什么条件？"
+      ];
+      questions.forEach((question) => {
+        const button = node("button", "quick", question);
+        button.type = "button";
+        button.addEventListener("click", () => ask(question));
+        quick.append(button);
+      });
+    }
+
+    let asking = false;
+    async function ask(question) {
+      const query = (question || "").trim();
+      if (!query || asking) return;
+      if (!state.current) {
+        toast("请先选择账单", true);
+        return;
+      }
+      asking = true;
+      byId("askButton").disabled = true;
+      byId("questionInput").value = "";
+      appendMessage("user", query);
+      const pending = appendMessage("assistant", "正在检索制度并核对账单事实…");
+      try {
+        const result = await api("/api/answer", {
+          method: "POST",
+          body: JSON.stringify({ question: query, bill_no: state.current })
+        });
+        pending.replaceWith(appendMessage("assistant", result.answer, result.citations));
+      } catch (error) {
+        pending.replaceWith(appendMessage("assistant", `查询失败：${error.message}`));
+      } finally {
+        asking = false;
+        byId("askButton").disabled = false;
+        byId("questionInput").focus();
+      }
+    }
+
+    function upsertDraft(draft) {
+      const index = state.drafts.findIndex((item) => item.draft_id === draft.draft_id);
+      if (index >= 0) state.drafts.splice(index, 1);
+      state.drafts.unshift(draft);
+      renderDrafts();
+    }
+
+    function openDraft(draft) {
+      state.activeDraft = draft;
+      byId("draftDialogMeta").textContent = `${draft.draft_id} · ${draft.bill_no}`;
+      byId("draftAmount").textContent = money(draft.amount);
+      byId("draftBody").textContent = draft.body;
+      const status = byId("draftStatus");
+      status.replaceChildren(node("span", `tag ${draft.status}`, statusLabel(draft.status)));
+      status.style.marginBottom = "12px";
+      const pending = draft.status === "pending";
+      byId("confirmDraft").hidden = !pending;
+      byId("confirmDraft").disabled = false;
+      byId("cancelDraft").textContent = pending ? "取消草稿" : "关闭";
+      byId("cancelDraft").disabled = false;
+      byId("draftDialog").showModal();
+    }
+
+    async function decideActive(action) {
+      const draft = state.activeDraft;
+      if (!draft) return;
+      if (draft.status !== "pending") {
+        byId("draftDialog").close();
+        return;
+      }
+      byId("confirmDraft").disabled = true;
+      byId("cancelDraft").disabled = true;
+      try {
+        const decided = await api(`/api/drafts/${encodeURIComponent(draft.draft_id)}/decision`, {
+          method: "POST",
+          body: JSON.stringify({ action })
+        });
+        upsertDraft(decided);
+        state.activeDraft = decided;
+        byId("draftDialog").close();
+        toast(action === "confirm" ? "已确认，草稿进入演示复核队列" : "草稿已取消");
+      } catch (error) {
+        toast(error.message, true);
+        byId("confirmDraft").disabled = false;
+        byId("cancelDraft").disabled = false;
+      }
+    }
+
+    byId("askForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      ask(byId("questionInput").value);
+    });
+    byId("confirmDraft").addEventListener("click", () => decideActive("confirm"));
+    byId("cancelDraft").addEventListener("click", () => decideActive("cancel"));
+    byId("dialogClose").addEventListener("click", () => byId("draftDialog").close());
+    byId("draftDialog").addEventListener("click", (event) => {
+      if (event.target === byId("draftDialog")) byId("draftDialog").close();
+    });
+
+    async function bootstrap() {
+      try {
+        const [billData, draftData] = await Promise.all([
+          api("/api/bills"),
+          api("/api/drafts")
+        ]);
+        state.bills = billData.items;
+        state.drafts = draftData.items;
+        renderBills();
+        renderDrafts();
+        resetConversation();
+        await Promise.all(state.bills.map(async (bill) => {
+          state.audits[bill.bill_no] = await api("/api/audit", {
+            method: "POST",
+            body: JSON.stringify({ bill_no: bill.bill_no })
+          });
+        }));
+        renderBills();
+        if (state.bills.length) await selectBill(state.bills[0].bill_no);
+      } catch (error) {
+        byId("billList").replaceChildren(node("div", "empty", "账单加载失败"));
+        byId("auditPanel").replaceChildren(node("div", "loading", error.message));
+        toast(error.message, true);
+      }
+    }
+
+    bootstrap();
+  </script>
+</body>
+</html>

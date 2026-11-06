@@ -125,6 +125,17 @@ APP_ENV=production docker compose up -d
 
 完整的部署拓扑、探针语义、备份恢复与故障处置见[运维手册](docs/operations.md)。
 
+## 轻量 MVP（独立演示）
+
+如果只需要离线演示“选账单 → 核对 → 制度问答 → 草稿 → 人工确认”，可以启动 `mvp/` 中的轻量版。它不调用模型、不需要向量库或数据库，金额仍复用同一个 `domain.py`：
+
+```bash
+python mvp/check_mvp.py          # 16 项 MVP 业务与接口验收
+python mvp/app.py --port 8010    # 仅监听本机
+```
+
+打开 <http://127.0.0.1:8010>。启动步骤、三分钟演示脚本、接口和正式版边界见 [MVP 说明](mvp/README.md)。
+
 ## 三分钟演示脚本
 
 演示时按这个顺序走，每条都能看到不同的机制：
