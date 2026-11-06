@@ -31,6 +31,7 @@ from core import (  # noqa: E402
     reviews,
     search,
 )
+from core import auth  # noqa: E402
 from core import engine as engine_module  # noqa: E402
 from core import EngineError  # noqa: E402
 
@@ -39,12 +40,24 @@ def _reset_state():
     """清空内存态，保证审核相关用例相互独立。"""
     engine_module._REVIEWS.clear()
     engine_module._DRAFTS.clear()
+    auth._SESSIONS.clear()
 
 
 def _pass_review_gates(bill_no: str) -> None:
     """通过审核点①（差异复核）和②（证据审核）的辅助函数。"""
     review_audit(bill_no, "验收-复核员", "acknowledge")
     confirm_evidence(bill_no, "验收-证据审核员", "confirm")
+
+
+def _login(client: TestClient, username: str) -> dict[str, str]:
+    """用演示口令登录指定账号，返回带 Authorization 的请求头。"""
+    response = client.post(
+        "/api/login",
+        json={"username": username, "password": auth.DEMO_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    token = response.json()["token"]
+    return {"Authorization": f"Bearer {token}"}
 
 
 # —— 制度知识库 ——
@@ -284,80 +297,240 @@ class HttpTests(unittest.TestCase):
         _reset_state()
         self.client = TestClient(app)
 
-    def test_complete_http_flow(self):
+    def test_complete_http_flow_spans_three_roles(self):
+        """完整争议链路须由三个不同角色接力完成（职责分离）。"""
         health = self.client.get("/api/health")
         self.assertEqual(health.status_code, 200)
         self.assertTrue(health.json()["ok"])
         self.assertGreaterEqual(health.json()["review_points"], 3)
 
-        bills = self.client.get("/api/bills")
+        # 运单录入员 林亦舟：只读（核对 + 问答）
+        clerk = _login(self.client, "linyizhou")
+        bills = self.client.get("/api/bills", headers=clerk)
         self.assertEqual(bills.status_code, 200)
         self.assertEqual(len(bills.json()["items"]), 3)
 
-        checked = self.client.post("/api/audit", json={"bill_no": "B202610-SF-001"})
+        checked = self.client.post(
+            "/api/audit", json={"bill_no": "B202610-SF-001"}, headers=clerk
+        )
         self.assertEqual(checked.status_code, 200)
         self.assertEqual(checked.json()["total_delta"], 4169.61)
 
         answered = self.client.post(
             "/api/answer",
             json={"question": "为什么多了钱？", "bill_no": "B202610-SF-001"},
+            headers=clerk,
         )
         self.assertEqual(answered.status_code, 200)
         self.assertIn("4169.61", answered.json()["answer"])
 
-        # 审核点① 差异复核
+        # 只读角色不能差异复核
+        forbidden = self.client.post(
+            "/api/reviews/audit",
+            json={"bill_no": "B202610-SF-001", "decision": "acknowledge"},
+            headers=clerk,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        # 对账专员 唐映秋：审核点① 差异复核 + 生成草稿
+        recon = _login(self.client, "tangyingqiu")
         reviewed = self.client.post(
             "/api/reviews/audit",
-            json={"bill_no": "B202610-SF-001", "reviewer": "复核员", "decision": "acknowledge"},
+            json={"bill_no": "B202610-SF-001", "decision": "acknowledge"},
+            headers=recon,
         )
         self.assertEqual(reviewed.status_code, 200)
         self.assertEqual(reviewed.json()["audit"]["decision"], "acknowledge")
+        self.assertEqual(reviewed.json()["audit"]["reviewer"], "唐映秋")
 
-        # 审核点② 证据审核
+        # 对账专员不能做证据审核（职责分离）
+        forbidden = self.client.post(
+            "/api/reviews/evidence",
+            json={"bill_no": "B202610-SF-001", "decision": "confirm"},
+            headers=recon,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        # 合同审计专员 傅景：审核点② 证据审核
+        auditor = _login(self.client, "fujing")
         evidence = self.client.post(
             "/api/reviews/evidence",
-            json={"bill_no": "B202610-SF-001", "reviewer": "证据审核员", "decision": "confirm"},
+            json={"bill_no": "B202610-SF-001", "decision": "confirm"},
+            headers=auditor,
         )
         self.assertEqual(evidence.status_code, 200)
+        self.assertEqual(evidence.json()["evidence"]["decision"], "confirm")
+        self.assertEqual(evidence.json()["evidence"]["reviewer"], "傅景")
 
-        created = self.client.post("/api/drafts", json={"bill_no": "B202610-SF-001"})
+        # 审计专员不能生成草稿（对账专员职责）
+        forbidden = self.client.post(
+            "/api/drafts", json={"bill_no": "B202610-SF-001"}, headers=auditor
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        # 对账专员生成草稿
+        created = self.client.post(
+            "/api/drafts", json={"bill_no": "B202610-SF-001"}, headers=recon
+        )
         self.assertEqual(created.status_code, 201)
         draft_id = created.json()["draft_id"]
 
-        # 审核点③ 争议终审
+        # 对账专员不能终审（结算经理职责）
+        forbidden = self.client.post(
+            f"/api/drafts/{draft_id}/decision",
+            json={"action": "confirm"},
+            headers=recon,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        # 结算经理 顾明岚：审核点③ 争议终审
+        manager = _login(self.client, "guminglan")
         decided = self.client.post(
             f"/api/drafts/{draft_id}/decision",
-            json={"action": "confirm", "reviewer": "终审人"},
+            json={"action": "confirm"},
+            headers=manager,
         )
         self.assertEqual(decided.status_code, 200)
         self.assertEqual(decided.json()["status"], "confirmed")
-        self.assertEqual(decided.json()["reviewer"], "终审人")
+        self.assertEqual(decided.json()["reviewer"], "顾明岚")
 
         repeated = self.client.post(
-            f"/api/drafts/{draft_id}/decision", json={"action": "confirm"}
+            f"/api/drafts/{draft_id}/decision",
+            json={"action": "confirm"},
+            headers=manager,
         )
         self.assertEqual(repeated.status_code, 409)
         self.assertIn("code", repeated.json())
 
-        drafts = self.client.get("/api/drafts")
+        # 全局查看（oversight）
+        drafts = self.client.get("/api/drafts", headers=manager)
         self.assertTrue(
             any(item["draft_id"] == draft_id for item in drafts.json()["items"])
         )
 
-    def test_agent_endpoint_reports_capability(self):
-        response = self.client.get("/api/agent")
+    def test_agent_endpoint_requires_oversight(self):
+        # 未登录 401
+        self.assertEqual(self.client.get("/api/agent").status_code, 401)
+        # 只读角色 403
+        clerk = _login(self.client, "linyizhou")
+        self.assertEqual(self.client.get("/api/agent", headers=clerk).status_code, 403)
+        # 全局查看角色 200
+        auditor = _login(self.client, "fujing")
+        response = self.client.get("/api/agent", headers=auditor)
         self.assertEqual(response.status_code, 200)
         self.assertIn("review_points", response.json())
         self.assertGreaterEqual(len(response.json()["review_points"]), 3)
 
     def test_http_errors_are_structured(self):
-        missing = self.client.post("/api/audit", json={"bill_no": "B-NOT-FOUND"})
+        clerk = _login(self.client, "linyizhou")
+        missing = self.client.post(
+            "/api/audit", json={"bill_no": "B-NOT-FOUND"}, headers=clerk
+        )
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.json()["code"], "BILL_NOT_FOUND")
 
         homepage = self.client.get("/")
         self.assertEqual(homepage.status_code, 200)
         self.assertIn("text/html", homepage.headers["content-type"])
+
+
+# —— 认证与权限 ——
+
+class AuthTests(unittest.TestCase):
+    def setUp(self):
+        _reset_state()
+        self.client = TestClient(app)
+
+    def test_login_returns_token_role_and_name(self):
+        response = self.client.post(
+            "/api/login", json={"username": "guminglan", "password": auth.DEMO_PASSWORD}
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["token"])
+        self.assertEqual(body["user"]["role_label"], "结算经理")
+        self.assertEqual(body["user"]["name"], "顾明岚")
+
+    def test_login_rejects_wrong_password(self):
+        response = self.client.post(
+            "/api/login", json={"username": "guminglan", "password": "wrong-password"}
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "INVALID_CREDENTIALS")
+
+    def test_login_rejects_unknown_user(self):
+        response = self.client.post(
+            "/api/login", json={"username": "nobody", "password": auth.DEMO_PASSWORD}
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_protected_endpoint_requires_token(self):
+        self.assertEqual(self.client.get("/api/bills").status_code, 401)
+        self.assertEqual(
+            self.client.post("/api/audit", json={"bill_no": "B202610-SF-001"}).status_code,
+            401,
+        )
+
+    def test_me_and_logout(self):
+        headers = _login(self.client, "linyizhou")
+        me = self.client.get("/api/me", headers=headers)
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json()["username"], "linyizhou")
+        self.assertEqual(me.json()["role_label"], "运单录入员")
+
+        logout = self.client.post("/api/logout", headers=headers)
+        self.assertEqual(logout.status_code, 200)
+        # 登出后令牌失效
+        self.assertEqual(self.client.get("/api/me", headers=headers).status_code, 401)
+
+
+class PermissionTests(unittest.TestCase):
+    def test_six_accounts_map_to_six_roles(self):
+        accounts = auth.accounts()
+        self.assertEqual(len(accounts), 6)
+        by_name = {item["name"] for item in accounts}
+        self.assertEqual(by_name, {"顾明岚", "林亦舟", "唐映秋", "秦芮", "傅景", "叶书"})
+
+    def test_three_review_points_are_held_by_three_distinct_roles(self):
+        perms = {item["username"]: set(item["permissions"]) for item in auth.accounts()}
+        # 审核点① 差异复核 → 对账专员
+        self.assertIn("review:audit", perms["tangyingqiu"])
+        self.assertNotIn("review:audit", perms["fujing"])
+        self.assertNotIn("review:audit", perms["guminglan"])
+        # 审核点② 证据审核 → 合同审计专员
+        self.assertIn("review:evidence", perms["fujing"])
+        self.assertNotIn("review:evidence", perms["tangyingqiu"])
+        self.assertNotIn("review:evidence", perms["guminglan"])
+        # 审核点③ 争议终审 → 结算经理
+        self.assertIn("draft:decide", perms["guminglan"])
+        self.assertNotIn("draft:decide", perms["tangyingqiu"])
+        self.assertNotIn("draft:decide", perms["fujing"])
+
+    def test_read_only_roles_cannot_perform_any_review(self):
+        client = TestClient(app)
+        for username in ("linyizhou", "yeshu", "qinrui"):
+            _reset_state()
+            headers = _login(client, username)
+            for path, body in (
+                ("/api/reviews/audit", {"bill_no": "B202610-SF-001", "decision": "acknowledge"}),
+                ("/api/reviews/evidence", {"bill_no": "B202610-SF-001", "decision": "confirm"}),
+                ("/api/drafts", {"bill_no": "B202610-SF-001"}),
+            ):
+                response = client.post(path, json=body, headers=headers)
+                self.assertEqual(response.status_code, 403, f"{username} {path}")
+
+    def test_reviewer_is_derived_from_login_not_client_input(self):
+        client = TestClient(app)
+        _reset_state()
+        recon = _login(client, "tangyingqiu")
+        # 客户端伪造 reviewer 也应被忽略，签核人取自登录身份
+        response = client.post(
+            "/api/reviews/audit",
+            json={"bill_no": "B202610-SF-001", "decision": "acknowledge", "reviewer": "伪造者"},
+            headers=recon,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["audit"]["reviewer"], "唐映秋")
 
 
 if __name__ == "__main__":

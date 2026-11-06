@@ -298,6 +298,60 @@
       transform: translateX(-50%);
     }
     .toast.error { background: #91383e; }
+    .login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: linear-gradient(160deg, #e8f1ee 0%, #f4f6f8 55%, #e7edf2 100%);
+    }
+    .login-card {
+      width: min(460px, 100%);
+      padding: 30px 28px 26px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 18px 60px rgba(23, 37, 51, .14);
+    }
+    .login-brand { display: flex; align-items: center; gap: 12px; }
+    .login-brand h1 { margin: 0; font-size: 19px; }
+    .login-sub { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+    .login-form { display: grid; gap: 10px; margin-top: 20px; }
+    .login-form input {
+      padding: 11px 12px;
+      border: 1px solid #d7dde3;
+      border-radius: 8px;
+      outline: none;
+    }
+    .login-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .login-btn { padding: 11px; }
+    .login-error {
+      margin-top: 12px;
+      padding: 10px 12px;
+      color: var(--danger);
+      background: var(--danger-soft);
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .account-chips { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .account-chip {
+      padding: 10px 11px;
+      text-align: left;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+    }
+    .account-chip:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .account-chip strong { display: block; font-size: 13px; }
+    .account-chip small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .top-actions { display: flex; align-items: center; gap: 14px; }
+    .user-chip { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+    .user-name { font-weight: 750; font-size: 13px; }
+    .user-role { color: var(--muted); font-size: 11px; }
+    .small-btn { padding: 7px 12px; font-size: 12px; }
+    .perm-hint { color: var(--muted); font-size: 11px; }
     [hidden] { display: none !important; }
     @media (max-width: 1120px) {
       body { overflow: auto; }
@@ -326,10 +380,37 @@
         <p>制度问答 × 确定性核账 × 人工确认</p>
       </div>
     </div>
-    <div class="top-note">金额由 domain.py 统一计算 · 争议单须人工确认<br>本地演示，不调用模型、不执行财务过账</div>
+    <div class="top-actions">
+      <div class="top-note">金额由 domain.py 统一计算 · 争议单须人工确认<br>本地演示，不调用模型、不执行财务过账</div>
+      <div class="user-chip">
+        <span id="userName" class="user-name">未登录</span>
+        <span id="userRole" class="user-role"></span>
+      </div>
+      <button id="logoutBtn" class="secondary small-btn" type="button" hidden>退出</button>
+    </div>
   </header>
 
-  <div class="workspace">
+  <div id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="brand-mark" aria-hidden="true">账</div>
+        <div>
+          <h1>物流费对账助手 <span class="mvp-badge">MVP</span></h1>
+        </div>
+      </div>
+      <p class="login-sub">基于六人访谈角色设置六类账号，权限对应三处人工审核点。<br>不同角色登录后可执行的操作不同。</p>
+      <form id="loginForm" class="login-form" autocomplete="on">
+        <input id="loginUser" name="username" placeholder="账号（如 guminglan）" autocomplete="username">
+        <input id="loginPass" name="password" type="password" placeholder="口令" autocomplete="current-password">
+        <button id="loginButton" class="primary login-btn" type="submit">登录</button>
+      </form>
+      <div id="loginError" class="login-error" hidden></div>
+      <div class="quick-title">演示账号（点击直接登录）</div>
+      <div id="accountChips" class="account-chips"></div>
+    </div>
+  </div>
+
+  <div id="workspace" class="workspace" hidden>
     <aside class="panel side-panel" aria-label="账单与草稿">
       <div class="section-head"><h2>待核对账单</h2><span id="billCount">载入中</span></div>
       <div id="billList" class="bill-list"><div class="loading">正在读取账单…</div></div>
@@ -376,8 +457,12 @@
 
   <script>
     "use strict";
-    const state = { bills: [], audits: {}, reviews: {}, current: null, audit: null, drafts: [], activeDraft: null };
+    const state = { bills: [], audits: {}, reviews: {}, current: null, audit: null, drafts: [], activeDraft: null, token: null, user: null };
     const byId = (id) => document.getElementById(id);
+
+    function can(permission) {
+      return !!(state.user && state.user.permissions && state.user.permissions.includes(permission));
+    }
 
     function node(tag, className, text) {
       const element = document.createElement(tag);
@@ -414,8 +499,13 @@
 
     async function api(path, options = {}) {
       const request = { ...options, headers: { ...(options.headers || {}) } };
+      if (state.token) request.headers["Authorization"] = "Bearer " + state.token;
       if (request.body) request.headers["Content-Type"] = "application/json";
       const response = await fetch(path, request);
+      if (response.status === 401 && state.token) {
+        doLogout(true);
+        throw new Error("登录已失效，请重新登录");
+      }
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || data.message || `请求失败（${response.status}）`);
       return data;
@@ -536,11 +626,11 @@
       return section;
     }
 
-    async function doReviewAudit(billNo, reviewer, decision) {
+    async function doReviewAudit(billNo, decision) {
       try {
         const record = await api("/api/reviews/audit", {
           method: "POST",
-          body: JSON.stringify({ bill_no: billNo, reviewer: reviewer || "未署名", decision })
+          body: JSON.stringify({ bill_no: billNo, decision })
         });
         state.reviews[billNo] = record;
         renderAudit();
@@ -550,11 +640,11 @@
       }
     }
 
-    async function doConfirmEvidence(billNo, reviewer, decision) {
+    async function doConfirmEvidence(billNo, decision) {
       try {
         const record = await api("/api/reviews/evidence", {
           method: "POST",
-          body: JSON.stringify({ bill_no: billNo, reviewer: reviewer || "未署名", decision })
+          body: JSON.stringify({ bill_no: billNo, decision })
         });
         state.reviews[billNo] = record;
         renderAudit();
@@ -581,17 +671,19 @@
         : "核对发现差异后，需人工确认差异是否成立"));
       step1.append(body1);
       if (!review.audit) {
-        const input = node("input", "review-input");
-        input.placeholder = "复核人";
-        const actions = node("div", "review-actions");
-        const ok = node("button", "primary review-btn", "确认成立");
-        ok.type = "button";
-        ok.addEventListener("click", () => doReviewAudit(result.bill_no, input.value, "acknowledge"));
-        const reject = node("button", "secondary review-btn", "驳回");
-        reject.type = "button";
-        reject.addEventListener("click", () => doReviewAudit(result.bill_no, input.value, "reject"));
-        actions.append(ok, reject);
-        step1.append(input, actions);
+        if (can("review:audit")) {
+          const actions = node("div", "review-actions");
+          const ok = node("button", "primary review-btn", "确认成立");
+          ok.type = "button";
+          ok.addEventListener("click", () => doReviewAudit(result.bill_no, "acknowledge"));
+          const reject = node("button", "secondary review-btn", "驳回");
+          reject.type = "button";
+          reject.addEventListener("click", () => doReviewAudit(result.bill_no, "reject"));
+          actions.append(ok, reject);
+          step1.append(actions);
+        } else {
+          step1.append(node("div", "step-meta muted-hint", "需对账专员（唐映秋）复核"));
+        }
       }
       flow.append(step1);
 
@@ -604,17 +696,19 @@
         : "确认证据齐备，或已知缺证仍继续"));
       step2.append(body2);
       if (auditDone && !review.evidence) {
-        const input = node("input", "review-input");
-        input.placeholder = "审核人";
-        const actions = node("div", "review-actions");
-        const ok = node("button", "primary review-btn", "确认");
-        ok.type = "button";
-        ok.addEventListener("click", () => doConfirmEvidence(result.bill_no, input.value, "confirm"));
-        const abort = node("button", "secondary review-btn", "中止");
-        abort.type = "button";
-        abort.addEventListener("click", () => doConfirmEvidence(result.bill_no, input.value, "abort"));
-        actions.append(ok, abort);
-        step2.append(input, actions);
+        if (can("review:evidence")) {
+          const actions = node("div", "review-actions");
+          const ok = node("button", "primary review-btn", "确认");
+          ok.type = "button";
+          ok.addEventListener("click", () => doConfirmEvidence(result.bill_no, "confirm"));
+          const abort = node("button", "secondary review-btn", "中止");
+          abort.type = "button";
+          abort.addEventListener("click", () => doConfirmEvidence(result.bill_no, "abort"));
+          actions.append(ok, abort);
+          step2.append(actions);
+        } else {
+          step2.append(node("div", "step-meta muted-hint", "需合同审计专员（傅景）审核"));
+        }
       } else if (!auditDone) {
         step2.append(node("div", "step-meta muted-hint", "请先完成①差异复核"));
       }
@@ -632,24 +726,28 @@
 
       if (auditDone && evidenceDone) {
         const wrap = node("div", "draft-cta");
-        const button = node("button", "primary", "生成争议单");
-        button.type = "button";
-        button.addEventListener("click", async () => {
-          button.disabled = true;
-          try {
-            const draft = await api("/api/drafts", {
-              method: "POST",
-              body: JSON.stringify({ bill_no: result.bill_no })
-            });
-            upsertDraft(draft);
-            openDraft(draft);
-          } catch (error) {
-            toast(error.message, true);
-          } finally {
-            button.disabled = false;
-          }
-        });
-        wrap.append(button);
+        if (can("draft:create")) {
+          const button = node("button", "primary", "生成争议单");
+          button.type = "button";
+          button.addEventListener("click", async () => {
+            button.disabled = true;
+            try {
+              const draft = await api("/api/drafts", {
+                method: "POST",
+                body: JSON.stringify({ bill_no: result.bill_no })
+              });
+              upsertDraft(draft);
+              openDraft(draft);
+            } catch (error) {
+              toast(error.message, true);
+            } finally {
+              button.disabled = false;
+            }
+          });
+          wrap.append(button);
+        } else {
+          wrap.append(node("div", "step-meta muted-hint", "需对账专员（唐映秋）生成争议单"));
+        }
         section.append(wrap);
       }
       return section;
@@ -799,17 +897,27 @@
       status.replaceChildren(node("span", `tag ${draft.status}`, statusLabel(draft.status)));
       status.style.marginBottom = "12px";
       const pending = draft.status === "pending";
-      byId("confirmDraft").hidden = !pending;
-      byId("confirmDraft").disabled = false;
-      byId("cancelDraft").textContent = pending ? "取消草稿" : "关闭";
-      byId("cancelDraft").disabled = false;
+      const canDecide = can("draft:decide");
+      if (pending && canDecide) {
+        byId("confirmDraft").hidden = false;
+        byId("confirmDraft").disabled = false;
+        byId("cancelDraft").textContent = "取消草稿";
+        byId("cancelDraft").disabled = false;
+      } else {
+        byId("confirmDraft").hidden = true;
+        byId("cancelDraft").textContent = "关闭";
+        byId("cancelDraft").disabled = false;
+        if (pending) {
+          status.append(node("div", "step-meta muted-hint", "当前角色无终审权限，需结算经理（顾明岚）确认"));
+        }
+      }
       byId("draftDialog").showModal();
     }
 
     async function decideActive(action) {
       const draft = state.activeDraft;
       if (!draft) return;
-      if (draft.status !== "pending") {
+      if (draft.status !== "pending" || !can("draft:decide")) {
         byId("draftDialog").close();
         return;
       }
@@ -868,7 +976,105 @@
       }
     }
 
-    bootstrap();
+    // —— 登录 / 退出 ——
+
+    function showLogin() {
+      byId("loginScreen").hidden = false;
+      byId("workspace").hidden = true;
+    }
+
+    function showApp() {
+      byId("loginScreen").hidden = true;
+      byId("workspace").hidden = false;
+    }
+
+    function renderUser() {
+      if (!state.user) return;
+      byId("userName").textContent = state.user.name;
+      byId("userRole").textContent = `${state.user.role_label} · ${state.user.username}`;
+      byId("logoutBtn").hidden = false;
+    }
+
+    async function doLogin(username, password) {
+      const loginButton = byId("loginButton");
+      loginButton.disabled = true;
+      try {
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: username.trim(), password })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.token) {
+          throw new Error(data.detail || data.message || "登录失败");
+        }
+        state.token = data.token;
+        state.user = data.user;
+        renderUser();
+        byId("loginError").hidden = true;
+        showApp();
+        await bootstrap();
+      } catch (error) {
+        byId("loginError").textContent = error.message;
+        byId("loginError").hidden = false;
+      } finally {
+        loginButton.disabled = false;
+      }
+    }
+
+    function doLogout(showLoginAfter = true) {
+      if (state.token) {
+        fetch("/api/logout", {
+          method: "POST",
+          headers: { "Authorization": "Bearer " + state.token }
+        }).catch(() => {});
+      }
+      state.token = null;
+      state.user = null;
+      state.bills = [];
+      state.drafts = [];
+      state.audits = {};
+      state.reviews = {};
+      state.current = null;
+      state.audit = null;
+      byId("logoutBtn").hidden = true;
+      byId("userName").textContent = "未登录";
+      byId("userRole").textContent = "";
+      if (showLoginAfter) showLogin();
+    }
+
+    async function initLogin() {
+      try {
+        const data = await fetch("/api/accounts").then((r) => r.json());
+        const chips = byId("accountChips");
+        chips.replaceChildren();
+        data.accounts.forEach((account) => {
+          const button = node("button", "account-chip");
+          button.type = "button";
+          button.append(
+            node("strong", "", account.name),
+            node("small", "", `${account.role_label} · ${account.username}`)
+          );
+          button.title = account.permissions.join("、");
+          button.addEventListener("click", () => {
+            byId("loginUser").value = account.username;
+            byId("loginPass").value = data.demo_password;
+            doLogin(account.username, data.demo_password);
+          });
+          chips.append(button);
+        });
+      } catch (error) {
+        // 账号清单加载失败不影响手工登录
+      }
+      byId("loginForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        doLogin(byId("loginUser").value, byId("loginPass").value);
+      });
+      byId("logoutBtn").addEventListener("click", () => doLogout(true));
+      showLogin();
+    }
+
+    initLogin();
   </script>
 </body>
 </html>

@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from . import auth
 from .agent import Agent, Effect, Tool
+from .auth import PERMISSION_LABELS, User, authenticate, login, logout, require_permission
 from .engine import (
     EngineError,
     answer,
@@ -34,6 +36,13 @@ __all__ = [
     "Clause",
     "KnowledgeBase",
     "EngineError",
+    "auth",
+    "User",
+    "PERMISSION_LABELS",
+    "authenticate",
+    "login",
+    "logout",
+    "require_permission",
     "KNOWLEDGE",
     "AGENT",
     "answer",
