@@ -179,6 +179,42 @@
       border-radius: 8px;
     }
     .verdict .primary { margin-top: 13px; }
+    .review-flow { margin-top: 4px; }
+    .review-step {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 13px;
+      margin-bottom: 9px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #fafbfb;
+    }
+    .review-step.done { border-color: #cde7d9; background: #f2faf5; }
+    .step-no {
+      flex: none;
+      width: 24px; height: 24px;
+      display: grid; place-items: center;
+      border-radius: 50%;
+      color: #fff; background: var(--accent);
+      font-size: 12px; font-weight: 800;
+    }
+    .review-step .step-body { flex: 1; min-width: 0; }
+    .review-step .step-title { font-weight: 700; font-size: 13px; }
+    .review-step .step-meta { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .muted-hint { color: #a0a8b0; }
+    .review-input {
+      flex: none; width: 110px;
+      padding: 7px 9px;
+      border: 1px solid #d7dde3;
+      border-radius: 7px;
+      font-size: 12px;
+      outline: none;
+    }
+    .review-input:focus { border-color: var(--accent); }
+    .review-actions { flex: none; display: flex; gap: 6px; }
+    .review-btn { padding: 7px 10px; font-size: 12px; }
+    .draft-cta { margin-top: 12px; }
     .content-section { margin-top: 22px; }
     .content-section h3 { margin: 0 0 12px; font-size: 15px; }
     .issue-card { margin-bottom: 11px; padding: 15px; border: 1px solid var(--line); border-radius: 10px; }
@@ -340,7 +376,7 @@
 
   <script>
     "use strict";
-    const state = { bills: [], audits: {}, current: null, audit: null, drafts: [], activeDraft: null };
+    const state = { bills: [], audits: {}, reviews: {}, current: null, audit: null, drafts: [], activeDraft: null };
     const byId = (id) => document.getElementById(id);
 
     function node(tag, className, text) {
@@ -500,6 +536,125 @@
       return section;
     }
 
+    async function doReviewAudit(billNo, reviewer, decision) {
+      try {
+        const record = await api("/api/reviews/audit", {
+          method: "POST",
+          body: JSON.stringify({ bill_no: billNo, reviewer: reviewer || "未署名", decision })
+        });
+        state.reviews[billNo] = record;
+        renderAudit();
+        toast(decision === "acknowledge" ? "差异已复核通过" : "差异已驳回");
+      } catch (error) {
+        toast(error.message, true);
+      }
+    }
+
+    async function doConfirmEvidence(billNo, reviewer, decision) {
+      try {
+        const record = await api("/api/reviews/evidence", {
+          method: "POST",
+          body: JSON.stringify({ bill_no: billNo, reviewer: reviewer || "未署名", decision })
+        });
+        state.reviews[billNo] = record;
+        renderAudit();
+        toast(decision === "confirm" ? "证据审核已确认" : "证据审核已中止");
+      } catch (error) {
+        toast(error.message, true);
+      }
+    }
+
+    function reviewFlow(result) {
+      const section = node("section", "content-section");
+      section.append(node("h3", "", "人工审核流程（三级确认）"));
+      const review = state.reviews[result.bill_no] || { audit: null, evidence: null };
+      const auditDone = !!(review.audit && review.audit.decision === "acknowledge");
+      const evidenceDone = !!(review.evidence && review.evidence.decision === "confirm");
+      const flow = node("div", "review-flow");
+
+      const step1 = node("div", `review-step${review.audit ? " done" : ""}`);
+      step1.append(node("span", "step-no", "①"));
+      const body1 = node("div", "step-body");
+      body1.append(node("div", "step-title", "差异复核"));
+      body1.append(node("div", "step-meta", review.audit
+        ? `${review.audit.reviewer} · ${review.audit.decision === "acknowledge" ? "已确认差异成立" : "已驳回"}`
+        : "核对发现差异后，需人工确认差异是否成立"));
+      step1.append(body1);
+      if (!review.audit) {
+        const input = node("input", "review-input");
+        input.placeholder = "复核人";
+        const actions = node("div", "review-actions");
+        const ok = node("button", "primary review-btn", "确认成立");
+        ok.type = "button";
+        ok.addEventListener("click", () => doReviewAudit(result.bill_no, input.value, "acknowledge"));
+        const reject = node("button", "secondary review-btn", "驳回");
+        reject.type = "button";
+        reject.addEventListener("click", () => doReviewAudit(result.bill_no, input.value, "reject"));
+        actions.append(ok, reject);
+        step1.append(input, actions);
+      }
+      flow.append(step1);
+
+      const step2 = node("div", `review-step${review.evidence ? " done" : ""}`);
+      step2.append(node("span", "step-no", "②"));
+      const body2 = node("div", "step-body");
+      body2.append(node("div", "step-title", "证据审核"));
+      body2.append(node("div", "step-meta", review.evidence
+        ? `${review.evidence.reviewer} · ${review.evidence.decision === "confirm" ? "已确认" : "已中止"}`
+        : "确认证据齐备，或已知缺证仍继续"));
+      step2.append(body2);
+      if (auditDone && !review.evidence) {
+        const input = node("input", "review-input");
+        input.placeholder = "审核人";
+        const actions = node("div", "review-actions");
+        const ok = node("button", "primary review-btn", "确认");
+        ok.type = "button";
+        ok.addEventListener("click", () => doConfirmEvidence(result.bill_no, input.value, "confirm"));
+        const abort = node("button", "secondary review-btn", "中止");
+        abort.type = "button";
+        abort.addEventListener("click", () => doConfirmEvidence(result.bill_no, input.value, "abort"));
+        actions.append(ok, abort);
+        step2.append(input, actions);
+      } else if (!auditDone) {
+        step2.append(node("div", "step-meta muted-hint", "请先完成①差异复核"));
+      }
+      flow.append(step2);
+
+      const step3 = node("div", "review-step");
+      step3.append(node("span", "step-no", "③"));
+      const body3 = node("div", "step-body");
+      body3.append(node("div", "step-title", "争议终审"));
+      body3.append(node("div", "step-meta", "生成争议草稿后，在弹窗中最终确认或取消"));
+      step3.append(body3);
+      flow.append(step3);
+
+      section.append(flow);
+
+      if (auditDone && evidenceDone) {
+        const wrap = node("div", "draft-cta");
+        const button = node("button", "primary", "生成争议单");
+        button.type = "button";
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            const draft = await api("/api/drafts", {
+              method: "POST",
+              body: JSON.stringify({ bill_no: result.bill_no })
+            });
+            upsertDraft(draft);
+            openDraft(draft);
+          } catch (error) {
+            toast(error.message, true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+        wrap.append(button);
+        section.append(wrap);
+      }
+      return section;
+    }
+
     function renderAudit() {
       const result = state.audit;
       const panel = byId("auditPanel");
@@ -528,27 +683,10 @@
       delta.append(node("small", "", "合计多收金额"), document.createTextNode(money(result.total_delta, true)));
       line.append(textWrap, delta);
       verdict.append(line, node("p", "", `${result.summary} 金额已按合同价目与运单事实逐行复算。`));
-      if (result.verdict === "fail") {
-        const button = node("button", "primary", "生成争议单");
-        button.type = "button";
-        button.addEventListener("click", async () => {
-          button.disabled = true;
-          try {
-            const draft = await api("/api/drafts", {
-              method: "POST",
-              body: JSON.stringify({ bill_no: result.bill_no })
-            });
-            upsertDraft(draft);
-            openDraft(draft);
-          } catch (error) {
-            toast(error.message, true);
-          } finally {
-            button.disabled = false;
-          }
-        });
-        verdict.append(button);
-      }
       panel.append(verdict);
+      if (result.verdict === "fail") {
+        panel.append(reviewFlow(result));
+      }
 
       const issueSection = node("section", "content-section");
       issueSection.append(node("h3", "", result.issues.length ? "差异明细" : "核对结论"));
@@ -571,6 +709,7 @@
           body: JSON.stringify({ bill_no: billNo })
         });
         state.audits[billNo] = state.audit;
+        state.reviews[billNo] = await api(`/api/reviews/${encodeURIComponent(billNo)}`);
         renderAudit();
         resetConversation();
       } catch (error) {

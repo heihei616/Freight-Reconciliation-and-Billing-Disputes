@@ -1,29 +1,26 @@
-"""轻量 MVP 的确定性业务内核：检索、账单核对、问答与人工确认。
+"""领域层：确定性账单核对、制度问答、争议草稿与人工审核状态机。
 
-金额和核对结论只来自主项目的 domain.py；本模块不做浮点运费推导，
-也不调用模型或向量数据库，确保演示结果可重复、可测试。
+金额与核对结论只来自主项目 domain.py；本模块不推导浮点运费，不调用模型或
+向量库，确保演示结果可重复、可测试。
+
+人工审核状态机（3 处人工确认/审核点）：
+- 审核点① 差异复核 review_audit：核对发现差异后，由人工确认差异是否成立。
+- 审核点② 证据审核 confirm_evidence：证据缺失时，由人工确认「已知缺证仍继续」或中止。
+- 审核点③ 争议终审 decide：草稿最终确认/取消，记录终审人。
+
+生成争议草稿 create_draft 要求先通过审核点①和②，否则返回 409，保证不可逆动作前有人工把关。
 """
 
 from __future__ import annotations
 
-import re
-import sys
 import threading
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from logistics_agent.core import domain  # noqa: E402
-
-POLICY_PATH = Path(__file__).with_name("policies.md")
+from . import domain
+from .knowledge import DEFAULT_POLICY_PATH, KnowledgeBase
 
 
 class EngineError(Exception):
@@ -35,17 +32,9 @@ class EngineError(Exception):
         self.code = code
 
 
-_CLAUSE_HEADING = re.compile(r"^##\s+(P-\d{2})\s+(.+?)\s*$", re.MULTILINE)
-_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "P-01": ("体积重", "体积重量", "抛比", "实重", "实际重量", "计费重量", "泡货", "6000", "5000"),
-    "P-02": ("阶梯", "单价", "基础运费", "最低收费", "最低一票", "落档", "价目"),
-    "P-03": ("燃油", "附加费", "费率", "上一季度", "油价"),
-    "P-04": ("重复计费", "重复", "核对", "逐行", "账单金额", "应收金额", "冲回"),
-    "P-05": ("争议额度", "额度", "月度上限", "审批", "结算经理", "争议金额"),
-    "P-06": ("证据", "凭证", "称重单", "签收回执", "签章", "盖章", "材料", "偏差"),
-    "P-07": ("人工确认", "确认", "草稿", "争议单", "提交", "取消", "绕过"),
-    "P-08": ("审计", "留痕", "差异解释", "计费明细", "复盘", "价目版本"),
-}
+# —— 知识库单例 ——
+KNOWLEDGE = KnowledgeBase(DEFAULT_POLICY_PATH)
+
 _ISSUE_POLICY = {
     "WEIGHT_BASIS_MISMATCH": "P-01",
     "UNIT_PRICE_MISMATCH": "P-02",
@@ -66,8 +55,10 @@ _CODE_LABELS = {
     "WAYBILL_NOT_FOUND": "运单不存在",
     "AMOUNT_MISMATCH": "金额不符",
 }
+
 _DRAFTS: dict[str, dict[str, Any]] = {}
-_DRAFT_LOCK = threading.RLock()
+_REVIEWS: dict[str, dict[str, Any]] = {}
+_LOCK = threading.RLock()
 
 
 def _now() -> str:
@@ -83,48 +74,31 @@ def _clean_bill_no(bill_no: str) -> str:
     return value
 
 
-@lru_cache(maxsize=1)
+def _clean_reviewer(reviewer: str | None, fallback: str) -> str:
+    return (reviewer or "").strip() or fallback
+
+
+def _clause_dict(clause) -> dict[str, str]:
+    return {"id": clause.id, "title": clause.title, "text": clause.text}
+
+
 def load_clauses() -> list[dict[str, str]]:
-    """把 policies.md 解析为稳定的 P-01～P-08 条款。"""
-    text = POLICY_PATH.read_text(encoding="utf-8")
-    matches = list(_CLAUSE_HEADING.finditer(text))
-    clauses: list[dict[str, str]] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        body = text[match.end():end].strip()
-        clauses.append({"id": match.group(1), "title": match.group(2), "text": body})
-    ids = [item["id"] for item in clauses]
-    expected = [f"P-{number:02d}" for number in range(1, 9)]
-    if ids != expected or any(not item["text"] for item in clauses):
-        raise RuntimeError("MVP 制度语料必须完整包含 P-01～P-08，且顺序稳定")
-    return clauses
-
-
-def _citation(clause_id: str) -> dict[str, str]:
-    for clause in load_clauses():
-        if clause["id"] == clause_id:
-            return dict(clause)
-    raise KeyError(clause_id)
+    """把 policies.md 解析为 P-01～P-08 条款（供健康检查与验收使用）。"""
+    return [_clause_dict(clause) for clause in KNOWLEDGE.clauses()]
 
 
 def search(query: str, limit: int = 3) -> list[dict[str, Any]]:
-    """可解释的关键词检索；没有命中时返回空列表而不是编一个条款。"""
+    """可解释的关键词检索；未命中返回空列表而不是编一个条款。"""
     question = (query or "").strip().lower()
     if not question:
         raise EngineError("问题不能为空", 400, "EMPTY_QUESTION")
     if len(question) > 500:
         raise EngineError("问题过长，请控制在 500 字以内", 400, "QUESTION_TOO_LONG")
-    limit = max(1, min(int(limit), 5))
-    ranked: list[tuple[int, str, dict[str, Any]]] = []
-    for clause in load_clauses():
-        score = 0
-        for keyword in _KEYWORDS[clause["id"]]:
-            if keyword.lower() in question:
-                score += 2 if keyword in clause["title"] else 1
-        if score:
-            ranked.append((score, clause["id"], {**clause, "score": score}))
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    return [item[2] for item in ranked[:limit]]
+    return KNOWLEDGE.search(query, limit)
+
+
+def _citation(clause_id: str) -> dict[str, str]:
+    return _clause_dict(KNOWLEDGE.cite(clause_id))
 
 
 def bills() -> list[dict[str, Any]]:
@@ -258,11 +232,97 @@ def answer(question: str, bill_no: str | None = None) -> dict[str, Any]:
     return {"answer": first_paragraph, "citations": matches[:2], "intent": "policy"}
 
 
+# —— 人工审核状态机 ——
+
+def reviews(bill_no: str) -> dict[str, Any] | None:
+    """查询某账单的审核记录（审核点①差异复核、②证据审核）。"""
+    normalized = _clean_bill_no(bill_no)
+    with _LOCK:
+        record = _REVIEWS.get(normalized)
+        return deepcopy(record) if record else None
+
+
+def list_reviews() -> list[dict[str, Any]]:
+    """列出全部审核记录。"""
+    with _LOCK:
+        return deepcopy(sorted(_REVIEWS.values(), key=lambda item: item["bill_no"]))
+
+
+def review_audit(bill_no: str, reviewer: str | None, decision: str) -> dict[str, Any]:
+    """审核点①：人工复核「差异是否成立」。
+
+    decision 仅接受 acknowledge（确认差异成立）或 reject（驳回）。
+    只有 acknowledge 后才允许进入后续证据审核与争议草稿。
+    """
+    normalized = _clean_bill_no(bill_no)
+    reviewer = _clean_reviewer(reviewer, "未署名审核人")
+    decision = (decision or "").strip().lower()
+    if decision not in {"acknowledge", "reject"}:
+        raise EngineError("decision 只能是 acknowledge 或 reject", 400, "BAD_DECISION")
+    result = audit(normalized)
+    if result["verdict"] != "fail":
+        raise EngineError("该账单没有多收差异，无需人工复核", 400, "NOTHING_TO_REVIEW")
+    with _LOCK:
+        record = _REVIEWS.setdefault(normalized, {"bill_no": normalized})
+        record["audit"] = {
+            "decision": decision,
+            "reviewer": reviewer,
+            "at": _now(),
+            "delta": result["total_delta"],
+            "issue_count": len(result["issues"]),
+        }
+        return deepcopy(record)
+
+
+def confirm_evidence(bill_no: str, reviewer: str | None, decision: str) -> dict[str, Any]:
+    """审核点②：人工审核「证据完整性」。
+
+    decision 仅接受 confirm（已知缺证仍继续）或 abort（中止）。
+    证据齐全时，confirm 表示人工确认证据齐备；缺失时 confirm 表示人工认可「缺证提交」。
+    前置：必须先通过审核点①（差异已 acknowledge）。
+    """
+    normalized = _clean_bill_no(bill_no)
+    reviewer = _clean_reviewer(reviewer, "未署名审核人")
+    decision = (decision or "").strip().lower()
+    if decision not in {"confirm", "abort"}:
+        raise EngineError("decision 只能是 confirm 或 abort", 400, "BAD_DECISION")
+    with _LOCK:
+        record = _REVIEWS.get(normalized)
+        audit_step = record.get("audit") if record else None
+    if not audit_step or audit_step["decision"] != "acknowledge":
+        raise EngineError("请先复核差异（审核点①）", 409, "REVIEW_REQUIRED")
+    evidence = domain.check_evidence(normalized)
+    if not evidence.get("found", False):
+        raise EngineError(f"账单不存在：{normalized}", 404, "BILL_NOT_FOUND")
+    with _LOCK:
+        record = _REVIEWS.setdefault(normalized, {"bill_no": normalized})
+        record["evidence"] = {
+            "decision": decision,
+            "reviewer": reviewer,
+            "at": _now(),
+            "complete": evidence["complete"],
+            "missing": evidence["missing"],
+        }
+        return deepcopy(record)
+
+
+def _require_reviews_passed(result: dict[str, Any]) -> dict[str, Any]:
+    """create_draft 的前置门：必须已通过审核点①和②。"""
+    with _LOCK:
+        record = _REVIEWS.get(result["bill_no"])
+    if not record or not record.get("audit") or record["audit"]["decision"] != "acknowledge":
+        raise EngineError("请先复核差异（审核点①）", 409, "REVIEW_REQUIRED")
+    if not record.get("evidence") or record["evidence"]["decision"] != "confirm":
+        raise EngineError("请先审核证据（审核点②）", 409, "EVIDENCE_REVIEW_REQUIRED")
+    return record
+
+
 def create_draft(bill_no: str) -> dict[str, Any]:
-    """只生成待确认草稿；金额不接受客户端传入。"""
+    """只生成待确认草稿；金额不接受客户端传入，且必须先通过审核点①和②。"""
     result = audit(bill_no)
     if result["verdict"] != "fail" or result["total_delta"] <= 0:
         raise EngineError("该账单没有多收差额，不能创建争议单", 400, "NO_OVERCHARGE")
+    review_record = _require_reviews_passed(result)
     evidence = domain.check_evidence(result["bill_no"])
     evidence_text = (
         "标准证据已齐备"
@@ -299,24 +359,27 @@ def create_draft(bill_no: str) -> dict[str, Any]:
         "status": "pending",
         "created_at": _now(),
         "decided_at": None,
+        "reviewed_by": review_record["audit"]["reviewer"],
+        "evidence_reviewed_by": review_record["evidence"]["reviewer"],
     }
-    with _DRAFT_LOCK:
+    with _LOCK:
         _DRAFTS[draft_id] = draft
     return deepcopy(draft)
 
 
 def list_drafts() -> list[dict[str, Any]]:
-    with _DRAFT_LOCK:
+    with _LOCK:
         items = sorted(_DRAFTS.values(), key=lambda item: item["created_at"], reverse=True)
         return deepcopy(items)
 
 
-def decide(draft_id: str, action: str) -> dict[str, Any]:
+def decide(draft_id: str, action: str, reviewer: str | None = None) -> dict[str, Any]:
+    """审核点③：争议终审（确认提交 / 取消），记录终审人。"""
     normalized_action = (action or "").strip().lower()
     if normalized_action not in {"confirm", "cancel"}:
         raise EngineError("action 只能是 confirm 或 cancel", 400, "BAD_ACTION")
     normalized_id = (draft_id or "").strip().upper()
-    with _DRAFT_LOCK:
+    with _LOCK:
         draft = _DRAFTS.get(normalized_id)
         if draft is None:
             raise EngineError(f"争议草稿不存在：{normalized_id}", 404, "DRAFT_NOT_FOUND")
@@ -324,4 +387,5 @@ def decide(draft_id: str, action: str) -> dict[str, Any]:
             raise EngineError("草稿已确认或已取消，不能重复操作", 409, "DRAFT_CLOSED")
         draft["status"] = "confirmed" if normalized_action == "confirm" else "cancelled"
         draft["decided_at"] = _now()
+        draft["reviewer"] = _clean_reviewer(reviewer, "未署名终审人")
         return deepcopy(draft)
