@@ -93,7 +93,7 @@ APP_CONFIG = load_config()
 
 STATIC_DIR = PACKAGE_DIR / "static"
 TEMPLATE_DIR = PACKAGE_DIR / "templates"
-SEED_DOC = KNOWLEDGE_DIR / "discovery-report.md"
+SEED_DOC = KNOWLEDGE_DIR / "六人访谈记录.md"
 
 # Jinja2 模板：后台页面全部服务端渲染，不依赖前端框架
 TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)

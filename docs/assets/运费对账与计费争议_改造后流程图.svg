@@ -1,0 +1,133 @@
+<svg viewBox="0 0 680 1152" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>运费对账与计费争议 AI 数智流程图（改造后）</title>
+<desc>四条泳道：采集侧（AI 自动归集）、计费侧（AI 规则引擎）、对账侧（AI 自动对账）、审批侧（人机协同）。紫色节点为 AI 介入，蓝色为人工环节，四个判断点保留转人工兜底，底部为争议复盘规则迭代闭环。</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+<rect x="40" y="48" width="4" height="238" fill="#185FA5"/>
+<rect x="40" y="286" width="4" height="336" fill="#0F6E56"/>
+<rect x="40" y="622" width="4" height="168" fill="#1D9E75"/>
+<rect x="40" y="790" width="4" height="320" fill="#534AB7"/>
+<line x1="40" y1="286" x2="640" y2="286" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="3 4"/>
+<line x1="40" y1="622" x2="640" y2="622" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="3 4"/>
+<line x1="40" y1="790" x2="640" y2="790" stroke="#B4B2A9" stroke-width="0.5" stroke-dasharray="3 4"/>
+<text x="52" y="158" font-size="14" font-weight="500" fill="#0C447C">采集侧</text>
+<text x="52" y="178" font-size="12" fill="#5F5E5A">AI 自动归集</text>
+<text x="52" y="446" font-size="14" font-weight="500" fill="#085041">计费侧</text>
+<text x="52" y="466" font-size="12" fill="#5F5E5A">AI 规则引擎</text>
+<text x="52" y="698" font-size="14" font-weight="500" fill="#085041">对账侧</text>
+<text x="52" y="718" font-size="12" fill="#5F5E5A">AI 自动对账</text>
+<text x="52" y="942" font-size="14" font-weight="500" fill="#3C3489">审批侧</text>
+<text x="52" y="962" font-size="12" fill="#5F5E5A">人机协同</text>
+<g>
+<rect x="180" y="60" width="300" height="44" rx="8" fill="#185FA5" stroke="#185FA5" stroke-width="0.5"/>
+<text x="330" y="76" font-size="13" font-weight="500" fill="#FFFFFF" text-anchor="middle" dominant-baseline="central">运输完成</text>
+<text x="330" y="93" font-size="12" fill="#FFFFFF" text-anchor="middle" dominant-baseline="central">每月 2.8 万票</text>
+</g>
+<g>
+<rect x="180" y="132" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="330" y="152" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle" dominant-baseline="central">① AI 运单自动归集</text>
+<text x="330" y="171" font-size="12" fill="#534AB7" text-anchor="middle" dominant-baseline="central">GPS · 电子回单 · OCR 舱单</text>
+</g>
+<g>
+<rect x="180" y="216" width="300" height="56" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+<text x="330" y="244" font-size="13" font-weight="500" fill="#633806" text-anchor="middle" dominant-baseline="central">四类材料齐全·口径一致？</text>
+</g>
+<g>
+<rect x="180" y="300" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="330" y="320" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle" dominant-baseline="central">② AI 重量口径校验</text>
+<text x="330" y="339" font-size="12" fill="#534AB7" text-anchor="middle" dominant-baseline="central">实际 / 体积分层 · 自动判定</text>
+</g>
+<g>
+<rect x="180" y="384" width="300" height="56" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+<text x="330" y="412" font-size="13" font-weight="500" fill="#633806" text-anchor="middle" dominant-baseline="central">口径明确·说明随单？</text>
+</g>
+<g>
+<rect x="180" y="468" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="330" y="488" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle" dominant-baseline="central">③ AI 计费规则引擎</text>
+<text x="330" y="507" font-size="12" fill="#534AB7" text-anchor="middle" dominant-baseline="central">一票一单 · 条件分层 · 封顶保底</text>
+</g>
+<g>
+<rect x="180" y="552" width="300" height="56" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+<text x="330" y="580" font-size="13" font-weight="500" fill="#633806" text-anchor="middle" dominant-baseline="central">版本 / 时间口径冲突？</text>
+</g>
+<g>
+<rect x="180" y="636" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="330" y="656" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle" dominant-baseline="central">④ AI 自动对账引擎</text>
+<text x="330" y="675" font-size="12" fill="#534AB7" text-anchor="middle" dominant-baseline="central">理论账单 × 承运商账单 · 差异弹窗</text>
+</g>
+<g>
+<rect x="180" y="720" width="300" height="56" rx="8" fill="#FAEEDA" stroke="#BA7517" stroke-width="0.5"/>
+<text x="330" y="748" font-size="13" font-weight="500" fill="#633806" text-anchor="middle" dominant-baseline="central">存在差异 / 漏收？</text>
+</g>
+<g>
+<rect x="180" y="804" width="300" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="330" y="824" font-size="14" font-weight="500" fill="#0C447C" text-anchor="middle" dominant-baseline="central">⑤ 人机协同结算</text>
+<text x="330" y="843" font-size="12" fill="#185FA5" text-anchor="middle" dominant-baseline="central">AI 建议 + 人工复核 · 可重算 100%</text>
+</g>
+<g>
+<rect x="180" y="888" width="300" height="44" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="330" y="910" font-size="14" font-weight="500" fill="#0C447C" text-anchor="middle" dominant-baseline="central">⑥ 在线确权 · 同步财务 ERP</text>
+</g>
+<g>
+<rect x="180" y="960" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="330" y="980" font-size="14" font-weight="500" fill="#3C3489" text-anchor="middle" dominant-baseline="central">⑦ AI BI 数据驾驶舱</text>
+<text x="330" y="999" font-size="12" fill="#534AB7" text-anchor="middle" dominant-baseline="central">成本分析 · 规则验算</text>
+</g>
+<g>
+<rect x="180" y="1044" width="300" height="44" rx="8" fill="#185FA5" stroke="#185FA5" stroke-width="0.5"/>
+<text x="330" y="1066" font-size="13" font-weight="500" fill="#FFFFFF" text-anchor="middle" dominant-baseline="central">结算完成</text>
+<text x="330" y="1083" font-size="12" fill="#FFFFFF" text-anchor="middle" dominant-baseline="central">差异项 1200 → 400 / 月</text>
+</g>
+<g>
+<rect x="520" y="216" width="120" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="580" y="236" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle" dominant-baseline="central">转人工补件</text>
+<text x="580" y="255" font-size="12" fill="#993C1D" text-anchor="middle" dominant-baseline="central">标注缺发·接手人</text>
+</g>
+<g>
+<rect x="520" y="384" width="120" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="580" y="404" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle" dominant-baseline="central">AI 暂存提示</text>
+<text x="580" y="423" font-size="12" fill="#993C1D" text-anchor="middle" dominant-baseline="central">转人工·不覆盖</text>
+</g>
+<g>
+<rect x="520" y="552" width="120" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="580" y="572" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle" dominant-baseline="central">附两版本</text>
+<text x="580" y="591" font-size="12" fill="#993C1D" text-anchor="middle" dominant-baseline="central">转审计</text>
+</g>
+<g>
+<rect x="520" y="720" width="120" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.5"/>
+<text x="580" y="740" font-size="13" font-weight="500" fill="#712B13" text-anchor="middle" dominant-baseline="central">AI 差异解释</text>
+<text x="580" y="759" font-size="12" fill="#993C1D" text-anchor="middle" dominant-baseline="central">仅建议·人工复核</text>
+</g>
+<line x1="330" y1="104" x2="330" y2="132" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="188" x2="330" y2="216" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="272" x2="330" y2="300" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="356" x2="330" y2="384" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="440" x2="330" y2="468" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="524" x2="330" y2="552" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="608" x2="330" y2="636" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="692" x2="330" y2="720" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="776" x2="330" y2="804" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="860" x2="330" y2="888" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="932" x2="330" y2="960" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="330" y1="1016" x2="330" y2="1044" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="480" y1="244" x2="520" y2="244" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="500" y="236" font-size="12" fill="#993C1D" text-anchor="middle">否</text>
+<line x1="480" y1="412" x2="520" y2="412" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="500" y="404" font-size="12" fill="#993C1D" text-anchor="middle">否</text>
+<line x1="480" y1="580" x2="520" y2="580" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="500" y="572" font-size="12" fill="#993C1D" text-anchor="middle">是</text>
+<line x1="480" y1="748" x2="520" y2="748" stroke="#993C1D" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="500" y="740" font-size="12" fill="#993C1D" text-anchor="middle">是</text>
+<text x="316" y="256" font-size="12" fill="#5F5E5A">是</text>
+<text x="316" y="424" font-size="12" fill="#5F5E5A">是</text>
+<text x="316" y="592" font-size="12" fill="#5F5E5A">否</text>
+<text x="316" y="760" font-size="12" fill="#5F5E5A">否</text>
+<g>
+<rect x="180" y="1108" width="310" height="44" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5" stroke-dasharray="4 3"/>
+<text x="335" y="1130" font-size="12" font-weight="500" fill="#085041" text-anchor="middle" dominant-baseline="central">争议复盘 · 规则迭代（每周）→ 回流 ④</text>
+</g>
+<path d="M176 1108 L176 700" fill="none" stroke="#0F6E56" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+</svg>
