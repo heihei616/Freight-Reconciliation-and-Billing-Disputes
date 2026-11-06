@@ -18,9 +18,9 @@ pre-commit install              # 可选，装完提交时自动检查
 最小集合（离线，约 1 秒）：
 
 ```bash
-python -m unittest discover -s tests -v
-python scripts/check_repo.py
-python scripts/check_docs.py
+python -m unittest discover -s code/tests -v
+python code/scripts/check_repo.py
+python code/scripts/check_docs.py
 ```
 
 装了 make 的话：
@@ -33,12 +33,12 @@ make check
 
 | 你改了什么 | 必须额外跑 |
 |---|---|
-| 工具前置条件、金额计算、建单权限 | `python scripts/check_gates.py` |
-| 系统提示词或能力包 | `python examples/demo_agent.py`（真实模型） |
-| 新增接口 | `python scripts/check_docs.py`（会核对路由与文档） |
-| 新增环境变量 | `python scripts/check_repo.py`（会核对 `.env.example`） |
-| 新增或删除文档、脚本 | `python scripts/check_docs.py` |
-| 改动人工确认、`pending_confirms` 表 | `python scripts/check_confirm_api.py`（需服务已启动，不调用模型） |
+| 工具前置条件、金额计算、建单权限 | `python code/scripts/check_gates.py` |
+| 系统提示词或能力包 | `python code/examples/demo_agent.py`（真实模型） |
+| 新增接口 | `python code/scripts/check_docs.py`（会核对路由与文档） |
+| 新增环境变量 | `python code/scripts/check_repo.py`（会核对 `.env.example`） |
+| 新增或删除文档、脚本 | `python code/scripts/check_docs.py` |
+| 改动人工确认、`pending_confirms` 表 | `python code/scripts/check_confirm_api.py`（需服务已启动，不调用模型） |
 
 涉及模型行为时，补充 `tests/data/eval_cases.json` 用例并记录真实轨迹；**不要把 mock 结果写成真实模型验证结果**。
 
@@ -67,7 +67,7 @@ make check
 
 - 这条规则能不能用代码强制？能就不要只写在提示里。
 - 改动会不会让模型开始复述自己的执行过程？`ThinkingFilter` 与提示词的「只写要说给用户的话」共同负责这一点。
-- 语气类改动（更自然、更简短）请用 `examples/demo_agent.py` 实跑三条轨迹确认没有退化。
+- 语气类改动（更自然、更简短）请用 `code/examples/demo_agent.py` 实跑三条轨迹确认没有退化。
 
 ## 分支与提交
 
@@ -77,7 +77,7 @@ make check
 
 - README 面向第一次接触项目的人，包含能跑通的完整步骤。
 - `docs/` 下每篇文档只讲一件事，标题层级不超过三级。
-- 文档里出现的路径、接口、命令必须真实存在——`scripts/check_docs.py` 会校验，CI 会拦。
+- 文档里出现的路径、接口、命令必须真实存在——`code/scripts/check_docs.py` 会校验，CI 会拦。
 
 ## 安全报告
 

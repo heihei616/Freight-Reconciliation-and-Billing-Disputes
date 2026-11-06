@@ -4,7 +4,7 @@
 .PHONY: help install install-dev run test coverage lint fmt check docs demo smoke-confirm clean
 
 PY ?= python
-export PYTHONPATH := src
+export PYTHONPATH := code/src
 
 help:  ## 显示所有可用目标
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -20,55 +20,55 @@ install-dev:  ## 安装开发依赖（ruff / coverage / pre-commit）
 
 run:  ## 启动服务
 	$(PY) -m logistics_agent.main
-# 等价：set PYTHONPATH=src && python -m logistics_agent.main
+# 等价：set PYTHONPATH=code/src && python -m logistics_agent.main
 
 test:  ## 跑离线单元测试（不访问网络与模型）
-	$(PY) -m unittest discover -s tests -v
-# 等价：python -m unittest discover -s tests -v
+	$(PY) -m unittest discover -s code/tests -v
+# 等价：python -m unittest discover -s code/tests -v
 
 coverage:  ## 跑测试并输出覆盖率报告
-	$(PY) -m coverage run -m unittest discover -s tests
+	$(PY) -m coverage run -m unittest discover -s code/tests
 	$(PY) -m coverage report -m
 	@echo "HTML 报告：htmlcov/index.html"
 
 lint:  ## 静态检查（未安装 ruff 时自动跳过）
-	-$(PY) -m ruff check src tests examples scripts
-	-$(PY) -m ruff format --check src tests examples scripts
+	-$(PY) -m ruff check code/src code/tests code/examples code/scripts
+	-$(PY) -m ruff format --check code/src code/tests code/examples code/scripts
 
 fmt:  ## 自动格式化
-	-$(PY) -m ruff format src tests examples scripts
-	-$(PY) -m ruff check --fix src tests examples scripts
+	-$(PY) -m ruff format code/src code/tests code/examples code/scripts
+	-$(PY) -m ruff check --fix code/src code/tests code/examples code/scripts
 
 check:  ## 一次性跑完所有检查：规范 → 文档 → 用例 → 闸门 → 测试
-	$(PY) scripts/check_repo.py
-	$(PY) scripts/check_docs.py
-	$(PY) scripts/check_cases.py
-	$(PY) scripts/check_gates.py
-	$(PY) -m unittest discover -s tests
-	$(PY) -m compileall -q src tests examples scripts
+	$(PY) code/scripts/check_repo.py
+	$(PY) code/scripts/check_docs.py
+	$(PY) code/scripts/check_cases.py
+	$(PY) code/scripts/check_gates.py
+	$(PY) -m unittest discover -s code/tests
+	$(PY) -m compileall -q code/src code/tests code/examples code/scripts
 	@echo "全部检查通过"
 
 preflight:  ## 上线前预检（生产标准，非 0 退出即阻断发布）
-	$(PY) scripts/preflight.py --env production
+	$(PY) code/scripts/preflight.py --env production
 # 注意：这一项会因「仍在使用演示口令」而失败，直到执行 make passwd。
 # 这是有意的——它正是发布门禁要拦的东西。
 
 passwd:  ## 列出账号与口令状态（谁还在用演示口令）
-	$(PY) scripts/set_password.py --list
+	$(PY) code/scripts/set_password.py --list
 
 passwd-set:  ## 改密：make passwd-set USER=admin
 	@test -n "$(USER)" || (echo "用法：make passwd-set USER=<账号>"; exit 2)
-	$(PY) scripts/set_password.py --user $(USER)
+	$(PY) code/scripts/set_password.py --user $(USER)
 
 docs:  ## 只校验文档与代码的一致性
-	$(PY) scripts/check_docs.py
+	$(PY) code/scripts/check_docs.py
 
 demo:  ## 离线业务示例（不调用模型）
-	$(PY) examples/demo.py
+	$(PY) code/examples/demo.py
 
 smoke-confirm:  ## 服务已启动时验证确认接口（不调用模型）
-	$(PY) scripts/check_confirm_api.py
-# 等价：PYTHONPATH=src python scripts/check_confirm_api.py
+	$(PY) code/scripts/check_confirm_api.py
+# 等价：PYTHONPATH=code/src python code/scripts/check_confirm_api.py
 
 clean:  ## 清理缓存与本地运行数据（不会碰 data/knowledge）
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

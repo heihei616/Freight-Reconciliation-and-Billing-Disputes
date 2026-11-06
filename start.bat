@@ -9,7 +9,7 @@ rem 2. open the login page in the default browser after 6s
 rem 3. run the app in this window; Ctrl+C to stop
 rem -----------------------------------------------------------
 
-set "PYTHONPATH=%~dp0src"
+set "PYTHONPATH=%~dp0code\src"
 
 if not exist "%~dp0.env" (
   echo [WARN] .env not found, the app will run in mock mode.

@@ -38,10 +38,10 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-COPY src/ ./src/
+COPY code/src/ ./src/
 COPY config/ ./config/
 COPY data/knowledge/ ./data/knowledge/
-COPY scripts/preflight.py scripts/backup_db.py ./scripts/
+COPY code/scripts/preflight.py code/scripts/backup_db.py ./scripts/
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app/src \

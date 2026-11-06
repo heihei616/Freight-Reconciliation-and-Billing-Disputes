@@ -8,12 +8,12 @@
 
 | 层次 | 入口 | 覆盖什么 | 需要模型/网络 |
 |---|---|---|---|
-| 单元测试 | `python -m unittest discover -s tests` | 领域计算、工具闸门、路由、限流、脱敏 | 否 |
-| 仓库自检 | `python scripts/check_repo.py` | 编码、换行、行尾、密钥、必备文件 | 否 |
-| 文档校验 | `python scripts/check_docs.py` | 文档里的链接、路径、接口、命令是否真实 | 否 |
-| 上线预检 | `PYTHONPATH=src python scripts/preflight.py` | 环境事实：依赖、权限、数据库、密钥、磁盘、备份 | 否 |
-| 接口自检 | `PYTHONPATH=src python scripts/check_confirm_api.py` | 确认状态经 HTTP 读写后是否一致 | 否，但需服务已启动 |
-| 端到端 | `python examples/demo_agent.py` | 真实模型的完整对话轨迹 | 是 |
+| 单元测试 | `python -m unittest discover -s code/tests` | 领域计算、工具闸门、路由、限流、脱敏 | 否 |
+| 仓库自检 | `python code/scripts/check_repo.py` | 编码、换行、行尾、密钥、必备文件 | 否 |
+| 文档校验 | `python code/scripts/check_docs.py` | 文档里的链接、路径、接口、命令是否真实 | 否 |
+| 上线预检 | `PYTHONPATH=code/src python code/scripts/preflight.py` | 环境事实：依赖、权限、数据库、密钥、磁盘、备份 | 否 |
+| 接口自检 | `PYTHONPATH=code/src python code/scripts/check_confirm_api.py` | 确认状态经 HTTP 读写后是否一致 | 否，但需服务已启动 |
+| 端到端 | `python code/examples/demo_agent.py` | 真实模型的完整对话轨迹 | 是 |
 
 前五层进 CI，每次提交都跑；最后一层手动执行，因为它买的是「模型今天表现如何」，不是「代码有没有被改坏」。
 
@@ -190,7 +190,7 @@
 
 ```bash
 # 全部单元测试（详细输出）
-python -m unittest discover -s tests -v
+python -m unittest discover -s code/tests -v
 
 # 单个文件
 python -m unittest tests.test_tools -v
@@ -199,7 +199,7 @@ python -m unittest tests.test_tools -v
 python -m unittest tests.test_core.FreightDomainTests.test_sf_bill_finds_three_planted_errors
 
 # 覆盖率（需要 coverage 包）
-python -m coverage run -m unittest discover -s tests
+python -m coverage run -m unittest discover -s code/tests
 python -m coverage report -m
 ```
 
@@ -220,15 +220,15 @@ python -m coverage report -m
 
 ## 端到端轨迹回放
 
-`examples/demo_agent.py` 会真实调用模型，逐轮打印工具名、参数、耗时和结果摘要，并断言关键约束（比如「只查计费规则”的场景不得调用建单工具）。它适合在以下时机手动跑：
+`code/examples/demo_agent.py` 会真实调用模型，逐轮打印工具名、参数、耗时和结果摘要，并断言关键约束（比如「只查计费规则”的场景不得调用建单工具）。它适合在以下时机手动跑：
 
 - 改完系统提示词，想确认模型行为没有退化
 - 换模型或换供应商后做回归
 - 演示前确认链路通畅
 
 ```bash
-python examples/demo_agent.py       # 跑三条
-python examples/demo_agent.py a     # 只跑第一条
+python code/examples/demo_agent.py       # 跑三条
+python code/examples/demo_agent.py a     # 只跑第一条
 ```
 
 ## CI 里跑什么

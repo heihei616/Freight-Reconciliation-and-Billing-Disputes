@@ -27,16 +27,16 @@ repos:
     hooks:
       - id: repo-hygiene
         name: 仓库规范自检
-        entry: python scripts/check_repo.py
+        entry: python code/scripts/check_repo.py
         language: system
         pass_filenames: false
       - id: docs-verify
         name: 文档与代码一致性校验
-        entry: python scripts/check_docs.py
+        entry: python code/scripts/check_docs.py
         language: system
         pass_filenames: false
       - id: offline-tests
         name: 离线单元测试
-        entry: python -m unittest discover -s tests
+        entry: python -m unittest discover -s code/tests
         language: system
         pass_filenames: false

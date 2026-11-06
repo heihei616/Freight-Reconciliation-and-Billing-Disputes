@@ -4,9 +4,9 @@
 
 ## 验证
 
-- [ ] `python -m unittest discover -s tests -v`
-- [ ] `python scripts/check_cases.py`
-- [ ] 涉及工具闸门时运行 `python scripts/check_gates.py`
+- [ ] `python -m unittest discover -s code/tests -v`
+- [ ] `python code/scripts/check_cases.py`
+- [ ] 涉及工具闸门时运行 `python code/scripts/check_gates.py`
 - [ ] 未提交 `.env`、数据库、索引缓存或真实业务敏感数据
 
 ## 影响范围

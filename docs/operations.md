@@ -16,8 +16,8 @@ python -m venv .venv
 .venv/Scripts/activate            # Windows；macOS/Linux 用 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env              # 填模型密钥
-PYTHONPATH=src python scripts/preflight.py
-PYTHONPATH=src python -m logistics_agent.main
+PYTHONPATH=code/src python code/scripts/preflight.py
+PYTHONPATH=code/src python -m logistics_agent.main
 ```
 
 ### 1.2 Docker Compose（推荐的交付方式）
@@ -77,11 +77,11 @@ location / {
 | 步骤 | 命令 | 通过标准 |
 |---|---|---|
 | 1. 配置 | 编辑 `.env` | 模型密钥、`JWT_SECRET`（≥32 字符）、`COOKIE_SECURE=1` 齐备 |
-| 2. 预检 | `PYTHONPATH=src python scripts/preflight.py --env production` | 无「失败」项 |
+| 2. 预检 | `PYTHONPATH=code/src python code/scripts/preflight.py --env production` | 无「失败」项 |
 | 3. 启动 | `python -m logistics_agent.main` / `docker compose up -d` | 日志出现「知识库就绪=True」且无配置错误 |
 | 4. 就绪 | `curl -fsS http://127.0.0.1:8000/readyz` | HTTP 200，三项检查全 true |
-| 5. 冒烟 | `PYTHONPATH=src python scripts/check_confirm_api.py` | 11 项通过 |
-| 6. 基线备份 | `PYTHONPATH=src python scripts/backup_db.py` | 生成 `chat-*.db` 并通过完整性校验 |
+| 5. 冒烟 | `PYTHONPATH=code/src python code/scripts/check_confirm_api.py` | 11 项通过 |
+| 6. 基线备份 | `PYTHONPATH=code/src python code/scripts/backup_db.py` | 生成 `chat-*.db` 并通过完整性校验 |
 | 7. 首个管理员 | 启动前设 `ADMIN_INITIAL_PASSWORD`，或先建库后用脚本改密 | `set_password.py --list` 全部显示「已自定义」 |
 
 第 2 步的 `--env production` 很关键：不带这个参数时，预检按开发标准执行，
@@ -164,7 +164,7 @@ readinessProbe:
 ### 5.1 备份
 
 ```bash
-PYTHONPATH=src python scripts/backup_db.py
+PYTHONPATH=code/src python code/scripts/backup_db.py
 # 容器内：
 docker compose exec app python scripts/backup_db.py
 ```
@@ -176,13 +176,13 @@ docker compose exec app python scripts/backup_db.py
 默认保留最近 14 份，改 `--keep`：
 
 ```bash
-PYTHONPATH=src python scripts/backup_db.py --keep 30
+PYTHONPATH=code/src python code/scripts/backup_db.py --keep 30
 ```
 
 建议放到每日定时任务里：
 
 ```cron
-0 2 * * * cd /opt/logistics-agent && PYTHONPATH=src /opt/venv/bin/python scripts/backup_db.py --keep 30 >> /var/log/logistics-backup.log 2>&1
+0 2 * * * cd /opt/logistics-agent && PYTHONPATH=code/src /opt/venv/bin/python code/scripts/backup_db.py --keep 30 >> /var/log/logistics-backup.log 2>&1
 ```
 
 ### 5.2 恢复
@@ -194,10 +194,10 @@ PYTHONPATH=src python scripts/backup_db.py --keep 30
 docker compose stop app          # 或结束裸跑进程
 
 # 2. 先确认备份可用
-PYTHONPATH=src python scripts/backup_db.py --verify data/runtime/backups/chat-20261105-021500.db
+PYTHONPATH=code/src python code/scripts/backup_db.py --verify data/runtime/backups/chat-20261105-021500.db
 
 # 3. 恢复（会先把当前库另存为 chat-before-restore-*.db）
-PYTHONPATH=src python scripts/backup_db.py --restore data/runtime/backups/chat-20261105-021500.db --yes
+PYTHONPATH=code/src python code/scripts/backup_db.py --restore data/runtime/backups/chat-20261105-021500.db --yes
 
 # 4. 起服并确认
 docker compose start app
@@ -238,7 +238,7 @@ RPO 由备份频率决定（每日一次 = 最多丢一天）；RTO 约 5 分钟
    改密同一套强度规则）后启动，系统据此建一个 `admin`。登录后**立刻改密**，并把该
    变量从环境中删掉。留着它在每次启动时只打印一行提醒，不会覆盖已有口令。
 2. **先建库再改密**：临时以 `APP_ENV=development` 起一次完成建表，执行
-   `python scripts/set_password.py --user admin` 设好口令，再切回 `production`。
+   `python code/scripts/set_password.py --user admin` 设好口令，再切回 `production`。
 
 两条路都不会把明文口令写进日志或代码。若生产库为空又没配 `ADMIN_INITIAL_PASSWORD`，
 启动会直接失败并给出上面两条路径——这比「起来了但没有任何人能登录」更容易排查。
@@ -249,7 +249,7 @@ RPO 由备份频率决定（每日一次 = 最多丢一天）；RTO 约 5 分钟
 开发库首次启动后的样子：
 
 ```bash
-python scripts/set_password.py --list
+python code/scripts/set_password.py --list
 ```
 
 ```
@@ -259,20 +259,20 @@ admin         系统管理员  admin     启用    演示口令（必须更换�
 employee      张员工      employee  启用    演示口令（必须更换）
 
 仍在用演示口令：admin、employee
-更换：python scripts/set_password.py --user admin
+更换：python code/scripts/set_password.py --user admin
 ```
 
 改密有两种方式：
 
 ```bash
 # 交互式：输入不回显，要求输两次（推荐人手操作）
-python scripts/set_password.py --user admin
+python code/scripts/set_password.py --user admin
 
 # 生成随机强口令并打印一次，抄进密码管理器
-python scripts/set_password.py --user admin --generate
+python code/scripts/set_password.py --user admin --generate
 
 # 自动化：口令从标准输入进，不落 shell 历史
-printf '%s\n' "$NEW_PASSWORD" | python scripts/set_password.py --user employee --stdin
+printf '%s\n' "$NEW_PASSWORD" | python code/scripts/set_password.py --user employee --stdin
 ```
 
 口令规则：至少 12 字符、不能与演示口令相同、不含 `password` / `123456` 这类片段、
@@ -385,7 +385,7 @@ export ADMIN_INITIAL_PASSWORD='<至少 12 位>'
 python -m logistics_agent.main
 
 # 2) 已有空库：直接写库设口令，不需要服务在跑
-python scripts/set_password.py --user admin
+python code/scripts/set_password.py --user admin
 ```
 
 ### 启动被「仍在使用演示口令」拒绝
@@ -397,10 +397,10 @@ RuntimeError: 生产环境仍在使用演示口令的账号：admin。服务已�
 这是从开发模式切的库：账号还在用 `admin123`。停服后离线改密即可，脚本直接写库：
 
 ```bash
-python scripts/set_password.py --user admin
+python code/scripts/set_password.py --user admin
 ```
 
-改完 `python scripts/preflight.py --env production` 确认「演示口令」一项变绿，再启动。
+改完 `python code/scripts/preflight.py --env production` 确认「演示口令」一项变绿，再启动。
 
 ### 登录返回 429：账号或 IP 被临时锁定
 
@@ -410,7 +410,7 @@ python scripts/set_password.py --user admin
 先判断是哪一类：
 
 - **只有一个人登不上** → 账号维度。多半是自己记错密码。等 15 分钟，或让管理员
-  直接重置口令（`python scripts/set_password.py --user <账号>`）。
+  直接重置口令（`python code/scripts/set_password.py --user <账号>`）。
 - **整个办公室都登不上** → IP 维度，通常是反向代理没配好：所有请求被记成
   同一个代理 IP，一个人手误就把所有人锁住。检查 uvicorn 的
   `FORWARDED_ALLOW_IPS` 是否包含反代地址（不能是 `*`，那会让来源 IP 可伪造）。
@@ -472,7 +472,7 @@ SELECT id, status, created_at, decided_at FROM pending_confirms ORDER BY created
 
 上线前逐项确认，全部可在 `preflight --env production` 里看到结果：
 
-- [ ] `admin` / `employee` 已改口令（`scripts/set_password.py --list` 里全部显示「已自定义」），或账号已停用
+- [ ] `admin` / `employee` 已改口令（`code/scripts/set_password.py --list` 里全部显示「已自定义」），或账号已停用
 - [ ] `JWT_SECRET` 显式设置且 ≥32 字符（见 6.2）
 - [ ] `COOKIE_SECURE=1`，且外部访问确实是 HTTPS
 - [ ] 模型地址是 https（内网自建模型需显式 `ALLOW_INSECURE_LLM=1`）

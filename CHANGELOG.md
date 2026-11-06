@@ -14,9 +14,9 @@
 - **存活/就绪探针**：`GET /healthz` 只回答「进程还活着」，`GET /readyz` 检查数据库可读、索引已加载、模型已配置，失败返回 503 与逐项明细。分开的原因：索引重建中应该摘流量，而不是被重启。
 - **安全响应头与 CSRF 校验**：所有响应补齐 `nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`、CSP；HTTPS 下自动加 HSTS。对带 Cookie 的写请求校验 `Origin`/`Referer` 同源，跨站提交返回 1026。
 - **Prometheus 指标**（`/metrics`，零依赖）：请求量按路由模板与状态码统计、耗时 summary、SSE 活跃数、待确认积压、数据库大小、切片数。默认只允许本机访问，跨机抓取需 `METRICS_TOKEN`。
-- **上线预检**（`scripts/preflight.py`）：一条命令检查 Python 版本、依赖、配置、目录权限、数据库完整性与可写性、演示口令、密钥强度、磁盘、端口、备份新鲜度、`.env` 权限；`--env production` 按生产标准执行，`--json` 供流水线解析，退出码可直接做发布门禁。
-- **在线备份与恢复**（`scripts/backup_db.py`）：用 SQLite 官方 backup API 取一致性快照，备份后做完整性校验、核心表行数核对，并把 WAL 合并回主文件（保证单文件可独立使用）。支持 `--verify`、`--restore`、`--keep`，恢复前会拒绝在服务运行时执行、并自动另存当前库。
-- **初始凭证轮换**（`scripts/set_password.py`）：`--list` 标出仍在用演示口令的账号，`--user` 交互改密（不回显、输两次），`--generate` 生成随机强口令，`--stdin` 供自动化。写库后立刻回读校验，确认新哈希能被登录逻辑认出来。这条补上了一个真实断点：此前预检报「仍在用演示口令」，但界面里没有改密入口，运维只能手写 PBKDF2 哈希。
+- **上线预检**（`code/scripts/preflight.py`）：一条命令检查 Python 版本、依赖、配置、目录权限、数据库完整性与可写性、演示口令、密钥强度、磁盘、端口、备份新鲜度、`.env` 权限；`--env production` 按生产标准执行，`--json` 供流水线解析，退出码可直接做发布门禁。
+- **在线备份与恢复**（`code/scripts/backup_db.py`）：用 SQLite 官方 backup API 取一致性快照，备份后做完整性校验、核心表行数核对，并把 WAL 合并回主文件（保证单文件可独立使用）。支持 `--verify`、`--restore`、`--keep`，恢复前会拒绝在服务运行时执行、并自动另存当前库。
+- **初始凭证轮换**（`code/scripts/set_password.py`）：`--list` 标出仍在用演示口令的账号，`--user` 交互改密（不回显、输两次），`--generate` 生成随机强口令，`--stdin` 供自动化。写库后立刻回读校验，确认新哈希能被登录逻辑认出来。这条补上了一个真实断点：此前预检报「仍在用演示口令」，但界面里没有改密入口，运维只能手写 PBKDF2 哈希。
 - **登录防爆破**（`ratelimit.LoginGuard`）：账号维度 15 分钟 5 次、IP 维度 5 分钟 20 次，超限返回 429 + `Retry-After`，在验证口令**之前**拦截，不消耗 PBKDF2 的 CPU。账号不存在时也走一次等价哈希，消除「查无此人响应更快」的计时差，避免用户名枚举。
 - **容器化交付**：多阶段 `Dockerfile`（非 root、内置健康检查、libgomp1 依赖）、`.dockerignore`、`docker-compose.yml`（命名卷、日志轮转、优雅停止、健康检查）。
 - **首次引导与演示账号分离**：开发环境首次启动照旧播种 `admin` / `employee`，双击就能演示；生产环境**不再播种**，空库改用 `ADMIN_INITIAL_PASSWORD`（≥12 位，走与命令行改密同一套强度规则）建出第一个管理员，库非空时该变量被忽略并提示移除。`SEED_DEMO_USERS` 可显式覆盖环境默认值，生产环境打开会被配置校验拒绝。口令策略统一收敛到 `auth.password_problems()`，启动引导与 `set_password.py` 共用一把尺子。
@@ -25,9 +25,9 @@
 
 ### 变更
 
-- `scripts/check_repo.py` 增加部署产物校验：Dockerfile 里 `COPY` 的路径必须存在、不能被 `.dockerignore` 排除，compose 引用的 env 文件缺失会告警。
-- `scripts/check_repo.py` 的编码与换行检查从只扫 `*.py` 扩到文档与配置（Markdown、YAML、TOML、Dockerfile、compose 等），二进制后缀显式跳过。此前 Markdown 被写成 CRLF 不会报错，最终表现为整文件 diff。
-- `scripts/deploy.sh` 的启动参数支持代理头，并在注释里写明横向扩展前要先处理限流计数。
+- `code/scripts/check_repo.py` 增加部署产物校验：Dockerfile 里 `COPY` 的路径必须存在、不能被 `.dockerignore` 排除，compose 引用的 env 文件缺失会告警。
+- `code/scripts/check_repo.py` 的编码与换行检查从只扫 `*.py` 扩到文档与配置（Markdown、YAML、TOML、Dockerfile、compose 等），二进制后缀显式跳过。此前 Markdown 被写成 CRLF 不会报错，最终表现为整文件 diff。
+- `code/scripts/deploy.sh` 的启动参数支持代理头，并在注释里写明横向扩展前要先处理限流计数。
 - 后台总览新增「待确认建单」统计卡，与 `/metrics` 的 `logistics_pending_confirms` 同源。
 - 新增[运维手册](docs/operations.md)：部署形态、上线流程、探针语义、告警建议、备份恢复、故障处置。
 
@@ -36,8 +36,8 @@
 - **生产环境可以带着 mock 模型上线**：以前只有一句启动告警，现在直接拒绝启动。
 - **配置校验与实现不一致**：`EMBEDDING_PROVIDER` 实际支持 `local` / `api`，校验规则最初只认 `openai`，会把正常配置判成错误——现已按真实读取逻辑对齐。
 - **文档校验器误报接口**：`check_docs.py` 会把「`POST` / `PUT` / `PATCH`」这类方法枚举读成「方法 + 根路径 `/`」，导致三处假失败。正则改为要求斜杠后必须有实际路径段，文档也改用顿号分隔。
-- **预检的修复建议指向不存在的入口**：原来写「登录后台修改密码」，但系统并没有改密接口。现在改为指向 `scripts/set_password.py`，并补上了这个脚本。
-- **生产首次启动必然失败（死锁）**：旧流程无条件播种 `admin/admin123`，紧接着又因「仍在使用演示口令」拒绝启动——全新的生产库永远起不来，而报错建议的「登录后台改密码」在服务未起来时也走不通。现在生产不播种，空库由 `ADMIN_INITIAL_PASSWORD` 引导；改密报错也改成「停服后执行 `scripts/set_password.py`」这条真实可用的离线路径。
+- **预检的修复建议指向不存在的入口**：原来写「登录后台修改密码」，但系统并没有改密接口。现在改为指向 `code/scripts/set_password.py`，并补上了这个脚本。
+- **生产首次启动必然失败（死锁）**：旧流程无条件播种 `admin/admin123`，紧接着又因「仍在使用演示口令」拒绝启动——全新的生产库永远起不来，而报错建议的「登录后台改密码」在服务未起来时也走不通。现在生产不播种，空库由 `ADMIN_INITIAL_PASSWORD` 引导；改密报错也改成「停服后执行 `code/scripts/set_password.py`」这条真实可用的离线路径。
 - **`preflight` 看不见「空库 + 生产 + 无引导口令」**：这个组合的后果是容器起来就退出，日志里只有一句 `RuntimeError`。现在新增「首次引导」检查项，在部署前就给出结论。
 
 ### 安全修复
@@ -71,7 +71,7 @@
 
 ### 变更
 
-- `scripts/deploy.sh` 的注释更新：确认中断已支持多 worker，但限流计数仍在内存，横向扩展前要先换 Redis 计数器。
+- `code/scripts/deploy.sh` 的注释更新：确认中断已支持多 worker，但限流计数仍在内存，横向扩展前要先换 Redis 计数器。
 - 设计说明的「已知限制」重写：移除「确认在单进程内存」「刷新丢确认」「没有日志保留期」三条已解决项，补上跨进程 0.4 秒延迟、多标签页不自动同步、`pending_confirms` 不自动清理三条新边界。
 
 ## [1.2.0] - 2026-11-05
@@ -105,8 +105,8 @@
 - **限流与配额**（`ratelimit.py`）：滑动窗口限流、按自然日分桶的每日配额、Agent 循环并发闸门，参数全部可用环境变量覆盖。
 - **日志脱敏**（`utils/masking.py`）：落库前统一抹除密钥、JWT、Bearer 令牌，遮罩手机号/邮箱/身份证，保留金额以满足审计需要；提供 `scan_for_secrets()` 供仓库扫描。
 - **文本工具**（`utils/text.py`）：全角转半角（修复微信/Excel 复制的单号匹配不上）、控制字符清理、截断、单号抽取。
-- **仓库规范自检**（`scripts/check_repo.py`）：零依赖检查编码、CRLF、行尾空白、语法、硬编码密钥、必备文件与环境变量覆盖度。
-- **文档一致性校验**（`scripts/check_docs.py`）：校验文档中的相对链接、项目路径、API 路由、脚本命令是否真实存在，并检查 README 必备章节。
+- **仓库规范自检**（`code/scripts/check_repo.py`）：零依赖检查编码、CRLF、行尾空白、语法、硬编码密钥、必备文件与环境变量覆盖度。
+- **文档一致性校验**（`code/scripts/check_docs.py`）：校验文档中的相对链接、项目路径、API 路由、脚本命令是否真实存在，并检查 README 必备章节。
 - **工程配置**：`ruff` 与覆盖率配置、`.editorconfig`、`.pre-commit-config.yaml`、`Makefile`、`requirements-dev.txt`。
 - **测试从 7 条扩到 88 条**：新增工具闸门、能力包路由、限流并发、脱敏与文本处理四组用例。
 - 新增[测试说明](docs/testing.md)，README 重写为完整的使用与排障手册。

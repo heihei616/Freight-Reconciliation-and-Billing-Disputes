@@ -71,18 +71,18 @@
 
 | # | 检查项 | 负责人 | 验证方法 | 通过标准 |
 |---|---|---|---|---|
-| 6.1 | 启动配置校验（fail fast）：非法配置不允许起服务 | 后端 + 运维 | ① `python scripts/preflight.py --env production`；② 分别把 `LLM_TIMEOUT=abc`、`EMBEDDING_BATCH_SIZE=9999`、`LLM_PROVIDER=foo` 写进临时 env 后启动 | 预检退出码非 0，逐条指出变量名、当前值、合法范围；进程直接退出而不是带病启动；`APP_ENV=production` 时检测到演示口令直接拒绝启动，不做「告警后继续」 |
+| 6.1 | 启动配置校验（fail fast）：非法配置不允许起服务 | 后端 + 运维 | ① `python code/scripts/preflight.py --env production`；② 分别把 `LLM_TIMEOUT=abc`、`EMBEDDING_BATCH_SIZE=9999`、`LLM_PROVIDER=foo` 写进临时 env 后启动 | 预检退出码非 0，逐条指出变量名、当前值、合法范围；进程直接退出而不是带病启动；`APP_ENV=production` 时检测到演示口令直接拒绝启动，不做「告警后继续」 |
 | 6.2 | 双探针语义正确：存活与就绪分开 | 运维 + 后端 | `curl -s localhost:8000/healthz`、`curl -s localhost:8000/readyz`；再把 DB 文件改名 / 清空知识库后重启，重复两次 | `/healthz` 只反映进程存活，恒 200，返回 `uptime_sec` 与 `version`；`/readyz` 在 DB 不可读、索引切片为 0、模型未配置时返回 503 且 body 指出具体失败项；探针不鉴权、不触发 LLM、不写业务日志 |
 | 6.3 | 指标可采集、基数可控 | 运维 + 后端 | `curl -s localhost:8000/metrics \| head -60`；发起 10 次 `/api/chat` 后再取一次，比对计数增量；再经反向代理访问一次；最后用错误 token 访问一次 | 输出符合 Prometheus 文本格式，含请求计数、SSE 活跃流、确认等待等指标；`route` 标签是路由模板（`/api/agent/runs/{run_id}`）而非原始路径，不随 run_id 膨胀；经代理访问（带 `X-Forwarded-For`）且无 token 时返回 403，说明「仅本机」没有被反代架空；生产环境未配 `METRICS_TOKEN` 时启动即失败；`METRICS_ENABLED=0` 返回 403 |
-| 6.4 | 备份可恢复且演练过 | 运维 | `python scripts/backup_db.py create` → `verify` → 在独立目录 `restore --yes`；再用恢复后的库起实例登录核对 | 备份是**单文件**（目录内无 `-wal` / `-shm` 残留）、`integrity_check` 为 ok；恢复后能登录、能查到 B202610-SF-001 且结论仍为 `fail 4169.61`；恢复前自动把当前库另存为 `chat-before-restore-*.db`，误操作可退 |
+| 6.4 | 备份可恢复且演练过 | 运维 | `python code/scripts/backup_db.py create` → `verify` → 在独立目录 `restore --yes`；再用恢复后的库起实例登录核对 | 备份是**单文件**（目录内无 `-wal` / `-shm` 残留）、`integrity_check` 为 ok；恢复后能登录、能查到 B202610-SF-001 且结论仍为 `fail 4169.61`；恢复前自动把当前库另存为 `chat-before-restore-*.db`，误操作可退 |
 | 6.5 | 容器化产物可用 | 运维 | `docker build -t logistics-agent:1.4.0 .`、`docker compose up -d`、`docker compose ps`、`docker compose down && docker compose up -d` | 镜像以非 root（UID 10001）运行；`HEALTHCHECK` 打 `/healthz` 且状态为 `healthy`；数据卷重建容器后数据仍在；镜像内不含 `.env`、`data/runtime/`、`tests/`；`.dockerignore` 与 Dockerfile 的 `COPY` 源路径一致（`check_repo.py` 已校验） |
 | 6.6 | 反向代理适配 | 运维 | nginx 前置后跑一次完整建单流；观察首字延迟与长任务耗时；检查 https 下响应头 `Set-Cookie` | `proxy_buffering off` 生效，SSE 首字延迟 < 2s（不能等整段缓冲完）；`proxy_read_timeout` ≥ 300s，确认等待 180s 不被 60s 默认值掐断；`X-Forwarded-Proto: https` 时 Cookie 带 `Secure`；`FORWARDED_ALLOW_IPS` 只填反代地址，不填 `*` |
-| 6.7 | CSRF 与安全响应头 | 安全 + 后端 | 用 `Origin: https://evil.example` 发一次 `POST /api/chat`，再用同源 Origin 发一次；`curl -I localhost:8000/` 看响应头；`python scripts/check_confirm_http.py` | 跨站写请求 403 且信封 `code=1026`，同源正常 200；GET 不受影响；响应含 `Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`；https 下有 `Strict-Transport-Security` |
+| 6.7 | CSRF 与安全响应头 | 安全 + 后端 | 用 `Origin: https://evil.example` 发一次 `POST /api/chat`，再用同源 Origin 发一次；`curl -I localhost:8000/` 看响应头；`python code/scripts/check_confirm_http.py` | 跨站写请求 403 且信封 `code=1026`，同源正常 200；GET 不受影响；响应含 `Content-Security-Policy`、`X-Content-Type-Options: nosniff`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`；https 下有 `Strict-Transport-Security` |
 | 6.8 | 优雅停机与发布门禁 | 运维 + QA | 建单确认进行中执行 `docker compose stop`，观察 30 秒宽限期内行为；把 `preflight --strict` 接进发布脚本，故意留一项 warning 触发一次 | 停机时进行中的 SSE 收到结束事件而非直接断连，SQLite 完成 checkpoint，重启后无残留 `-wal` 归属冲突；预检非 0 时发布流程中止，不允许「先发再修」 |
 | 6.9 | 运维手册可用 | 运维 + 业务 | 让未参与开发的同学只按 `docs/operations.md` 完成一次「部署 → 备份 → 触发一次告警 → 回滚」 | 全程不询问开发即可完成；手册里的命令可原样复制执行；故障排查章节覆盖「readyz 503」「SSE 卡住」「备份恢复后数据不对」三类真实场景 |
-| 6.10 | 初始凭证已轮换 | 安全 + 运维 | `python scripts/set_password.py --list`；再用新口令登录一次，用旧口令尝试登录一次 | 两个演示账号都显示「已自定义」；新口令可登录、旧演示口令登录失败；改密后回读校验通过；已确认「旧令牌在 8 小时内仍有效」这一残留窗口已被业务方接受，或已同步轮换 `JWT_SECRET` |
+| 6.10 | 初始凭证已轮换 | 安全 + 运维 | `python code/scripts/set_password.py --list`；再用新口令登录一次，用旧口令尝试登录一次 | 两个演示账号都显示「已自定义」；新口令可登录、旧演示口令登录失败；改密后回读校验通过；已确认「旧令牌在 8 小时内仍有效」这一残留窗口已被业务方接受，或已同步轮换 `JWT_SECRET` |
 | 6.11 | 账号生命周期可处置 | 安全 + 运维 | 对一个测试账号执行停用（`users.is_active=0`）后尝试登录；核对停用后其历史会话是否仍可被他人访问 | 停用账号立即无法登录；历史数据按保留策略留存但不新增；确认「停用无界面入口」这一限制已被记录（见 `docs/design.md` 第 12 节第 11 条），并有替代操作手册 |
-| 6.12 | 全新生产库能完成首次引导 | 后端 + 运维 | 用一个空目录起一套生产配置：① 不设 `ADMIN_INITIAL_PASSWORD` 启动，观察是否拒绝并给出两条路径；② 设 `ADMIN_INITIAL_PASSWORD`（≥12 位）重启，用 `admin` 登录；③ `python scripts/set_password.py --list` | ① 启动失败，日志含 `ADMIN_INITIAL_PASSWORD` 与 `set_password.py` 两条可执行路径，且 `users` 表仍为空；② 登录成功，`employee` 账号不存在（生产不播种）；③ 显示「已自定义」，`preflight --env production` 的「演示口令」一项为通过 |
+| 6.12 | 全新生产库能完成首次引导 | 后端 + 运维 | 用一个空目录起一套生产配置：① 不设 `ADMIN_INITIAL_PASSWORD` 启动，观察是否拒绝并给出两条路径；② 设 `ADMIN_INITIAL_PASSWORD`（≥12 位）重启，用 `admin` 登录；③ `python code/scripts/set_password.py --list` | ① 启动失败，日志含 `ADMIN_INITIAL_PASSWORD` 与 `set_password.py` 两条可执行路径，且 `users` 表仍为空；② 登录成功，`employee` 账号不存在（生产不播种）；③ 显示「已自定义」，`preflight --env production` 的「演示口令」一项为通过 |
 
 ---
 
@@ -105,11 +105,11 @@
 > 下面保留原始判断，并在条目内标注现状，便于验收时对照。
 
 1. **没有任何限流与配额实现**（2.1、2.2）：~~`app.py` 未见信号量或速率限制~~ → **已补**：`ratelimit.py` 提供滑动窗口、每日配额与并发闸门，已接入 `/api/chat`；验收时按 2.1 实测第 11 次返回 429。
-2. **确认中断只在单进程内存**（2.4、3.3）：~~多 worker 部署会拿不到确认事件~~ → **已解决**：确认状态迁到 `pending_confirms` 表，`WHERE status='pending'` 的原子更新保证并发的两次点击只有一次生效，跨进程由等待方每 0.4 秒轮询发现。验收时用 `python scripts/check_confirm_api.py` 走完「查询 → 确认 → 待办清空 → 重复 409」。仍有边界：限流计数还在内存，横向扩展前要先换 Redis。
+2. **确认中断只在单进程内存**（2.4、3.3）：~~多 worker 部署会拿不到确认事件~~ → **已解决**：确认状态迁到 `pending_confirms` 表，`WHERE status='pending'` 的原子更新保证并发的两次点击只有一次生效，跨进程由等待方每 0.4 秒轮询发现。验收时用 `python code/scripts/check_confirm_api.py` 走完「查询 → 确认 → 待办清空 → 重复 409」。仍有边界：限流计数还在内存，横向扩展前要先换 Redis。
 3. **日志无保留期与清理任务**（1.3）：~~`agent_steps`、`tool_calls` 只增不减~~ → **已补**：`LOG_RETENTION_DAYS` 默认 90 天，后台任务启动清理一次、之后每 24 小时一次；落库前已统一脱敏。验收时用 `GET /admin/api/maintenance/retention` 预演。
-4. **演示口令不得带入生产**：~~`admin/admin123`、`employee/emp123` 会在首次启动时自动创建~~ → **已解决根因**：生产环境不再播种演示账号（`SEED_DEMO_USERS` 默认按环境判断，生产显式打开会被配置校验拦住），空库改由 `ADMIN_INITIAL_PASSWORD` 建出第一个管理员。此前那版「先建弱口令、再因弱口令拒绝启动」的死锁也一并消失。开发环境仍保留演示账号以便双击演示；轮换用 `scripts/set_password.py`（`--list` 看状态、`--user` 交互改密、`--generate` 随机生成、`--stdin` 供自动化），写库后回读校验保证新哈希能被登录逻辑认出来。验收见 6.10、6.12。
+4. **演示口令不得带入生产**：~~`admin/admin123`、`employee/emp123` 会在首次启动时自动创建~~ → **已解决根因**：生产环境不再播种演示账号（`SEED_DEMO_USERS` 默认按环境判断，生产显式打开会被配置校验拦住），空库改由 `ADMIN_INITIAL_PASSWORD` 建出第一个管理员。此前那版「先建弱口令、再因弱口令拒绝启动」的死锁也一并消失。开发环境仍保留演示账号以便双击演示；轮换用 `code/scripts/set_password.py`（`--list` 看状态、`--user` 交互改密、`--generate` 随机生成、`--stdin` 供自动化），写库后回读校验保证新哈希能被登录逻辑认出来。验收见 6.10、6.12。
 5. **知识库目录混入非制度文档**：~~`docs/agent_loop_trajectories.md` 会被索引~~ → **已解决**：索引目录收敛为 `data/knowledge/`，`docs/` 只放项目文档。
-6. **缺少部署与运维产物**（第六章）：~~没有容器化、没有探针、没有指标、备份只停留在「提一句要做」~~ → **已补**：多阶段 `Dockerfile` + `docker-compose.yml`（非 root、HEALTHCHECK、日志轮转）、`/healthz` `/readyz` `/metrics` 三个端点、`scripts/preflight.py` 12 类检查、`scripts/backup_db.py` 单文件备份与恢复、`docs/operations.md` 九章运维手册。验收口径见第六章 6.1~6.12。
+6. **缺少部署与运维产物**（第六章）：~~没有容器化、没有探针、没有指标、备份只停留在「提一句要做」~~ → **已补**：多阶段 `Dockerfile` + `docker-compose.yml`（非 root、HEALTHCHECK、日志轮转）、`/healthz` `/readyz` `/metrics` 三个端点、`code/scripts/preflight.py` 12 类检查、`code/scripts/backup_db.py` 单文件备份与恢复、`docs/operations.md` 九章运维手册。验收口径见第六章 6.1~6.12。
 
 ---
 
@@ -118,12 +118,12 @@
 前五节大量条目依赖人工场景，但下面六条能覆盖其中大部分回归面。发布前必须全绿，输出贴进发布记录：
 
 ```bash
-python -m unittest discover -s tests -v     # 256 条单元测试
-python scripts/check_gates.py               # 工具闸门 8 场景 16 项断言
-python scripts/check_confirm_api.py         # 确认状态机 11 项断言
-python scripts/check_repo.py                # 目录、版本、部署文件一致性
-python scripts/check_docs.py                # 文档里的接口与路径真实存在
-python scripts/preflight.py --env production --strict   # 上线前 12 类检查
+python -m unittest discover -s code/tests -v     # 256 条单元测试
+python code/scripts/check_gates.py               # 工具闸门 8 场景 16 项断言
+python code/scripts/check_confirm_api.py         # 确认状态机 11 项断言
+python code/scripts/check_repo.py                # 目录、版本、部署文件一致性
+python code/scripts/check_docs.py                # 文档里的接口与路径真实存在
+python code/scripts/preflight.py --env production --strict   # 上线前 12 类检查
 ```
 
 六条全过 ≠ 可以上线，但任一条不过一定不能上线。人工项（第四章内容安全、6.9 手册演练）无法被脚本替代。

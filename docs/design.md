@@ -138,8 +138,8 @@
 | 层 | 产物 | 解决什么 | 明确不负责 |
 |---|---|---|---|
 | 进程内 | `utils/config.py`、`/healthz`、`/readyz`、`/metrics` | 配置对不对、进程活没活、能不能接流量、当前忙不忙 | 不管重启、不管 TLS |
-| 容器 | `Dockerfile`、`docker-compose.yml`、`scripts/backup_db.py` | 一致的运行环境、生命周期与健康判定、数据持久化与可恢复 | 不管多机调度、不管证书 |
-| 编排与反代 | nginx / 负载均衡、`scripts/preflight.py` | TLS、超时与缓冲、发布门禁 | 不管业务逻辑 |
+| 容器 | `Dockerfile`、`docker-compose.yml`、`code/scripts/backup_db.py` | 一致的运行环境、生命周期与健康判定、数据持久化与可恢复 | 不管多机调度、不管证书 |
+| 编排与反代 | nginx / 负载均衡、`code/scripts/preflight.py` | TLS、超时与缓冲、发布门禁 | 不管业务逻辑 |
 
 ### 10.1 启动即校验，而不是启动后告警
 
@@ -149,7 +149,7 @@
 
 放在入口而不是 lifespan 里，是因为 lifespan 抛异常时端口往往已经绑上、日志也已经出现过启动完成的假象，容器编排看到的现象会很混乱。入口退出最干净：非 0 退出码，`restart: unless-stopped` 也不会陷入重启风暴。
 
-同一张规则表被 `scripts/preflight.py` 复用，所以「人手动跑的检查」和「进程启动时的检查」不会各写一套、慢慢漂移。
+同一张规则表被 `code/scripts/preflight.py` 复用，所以「人手动跑的检查」和「进程启动时的检查」不会各写一套、慢慢漂移。
 
 ### 10.2 双探针：把「活着」和「能干」分开
 
@@ -174,7 +174,7 @@
 
 WAL 模式下直接 `cp chat.db` 得到的可能是一个缺少最近提交的文件，而且旁边还躺着 `-wal`，很容易被当成「备份完整」收进归档。真到恢复时才发现少了几小时数据。
 
-`scripts/backup_db.py` 走 SQLite 的在线 `backup()` API，完成后 `wal_checkpoint(TRUNCATE)` 并把 `journal_mode` 切回 `DELETE`，保证产物是**单文件**——这一点有测试锁着（`test_backup_file_is_standalone`）。`verify` 做 `integrity_check` 并比对各表行数，`create` 之后自动清理超出保留份数的旧备份。
+`code/scripts/backup_db.py` 走 SQLite 的在线 `backup()` API，完成后 `wal_checkpoint(TRUNCATE)` 并把 `journal_mode` 切回 `DELETE`，保证产物是**单文件**——这一点有测试锁着（`test_backup_file_is_standalone`）。`verify` 做 `integrity_check` 并比对各表行数，`create` 之后自动清理超出保留份数的旧备份。
 
 恢复比备份危险得多，所以加了四道闸：必须显式 `--yes`、检查 8000 端口没有实例在跑、先把当前库另存为 `chat-before-restore-*.db`、恢复后立刻 `integrity_check`。先删 `-wal` / `-shm` 再恢复，否则旧 WAL 会在下次打开时把数据盖回去——这个坑在演练时真实踩到过。
 
@@ -205,13 +205,13 @@ WAL 模式下直接 `cp chat.db` 得到的可能是一个缺少最近提交的�
 | 手段 | 覆盖 |
 |---|---|
 | 256 条单元测试 | 金额、闸门、路由、限流、脱敏、确认状态机、配置校验、HTTP 加固、备份、指标、凭据轮换、登录防爆破、首次引导，全部离线 |
-| `scripts/check_gates.py` | 绕过模型直接攻击工具闸门，8 场景 16 项断言 |
-| `scripts/check_confirm_api.py` | 不调模型，用 HTTP 验证确认状态机，11 项断言 |
-| `scripts/check_repo.py` | 目录结构、版本号三处一致、Dockerfile 的 `COPY` 源路径与 `.dockerignore` 不冲突 |
-| `scripts/check_docs.py` | 文档里的链接、路径、接口、命令是否真实存在 |
-| `scripts/preflight.py` | 12 类上线前检查：依赖、配置、目录可写、数据库完整性、密钥强度、磁盘、端口、备份新鲜度、`.env` 权限 |
+| `code/scripts/check_gates.py` | 绕过模型直接攻击工具闸门，8 场景 16 项断言 |
+| `code/scripts/check_confirm_api.py` | 不调模型，用 HTTP 验证确认状态机，11 项断言 |
+| `code/scripts/check_repo.py` | 目录结构、版本号三处一致、Dockerfile 的 `COPY` 源路径与 `.dockerignore` 不冲突 |
+| `code/scripts/check_docs.py` | 文档里的链接、路径、接口、命令是否真实存在 |
+| `code/scripts/preflight.py` | 12 类上线前检查：依赖、配置、目录可写、数据库完整性、密钥强度、磁盘、端口、备份新鲜度、`.env` 权限 |
 | `tests/data/eval_cases.json` | 30 条评测用例：制度 / 工具 / 违规意图 / 多轮 |
-| `examples/demo_agent.py` | 真实模型回放三条典型轨迹 |
+| `code/examples/demo_agent.py` | 真实模型回放三条典型轨迹 |
 
 七个新增测试文件各自锁一类「以前只能靠人记」的东西：`test_config.py` 锁配置边界（26 条）、`test_http_hardening.py` 锁 CSRF、安全头、登录跳转与上传边界（24 条）、`test_backup.py` 锁备份单文件与恢复语义（9 条）、`test_metrics.py` 锁指标格式与标签基数（13 条）、`test_set_password.py` 锁「改完能被登录逻辑认出来」（19 条）、`test_login_guard.py` 锁「锁得住也锁得准」（10 条）、`test_bootstrap.py` 锁「全新的生产库能起来且不播种弱口令」（15 条）。这些都不是业务逻辑，但都是上线后才暴露、暴露时已经造成损失的那类问题。
 

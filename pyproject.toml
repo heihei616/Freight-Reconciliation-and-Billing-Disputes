@@ -34,10 +34,10 @@ dev = [
 logistics-agent = "logistics_agent.main:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "code/src"}
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["code/src"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
@@ -56,7 +56,7 @@ logistics_agent = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-src = ["src", "tests", "examples", "scripts"]
+src = ["code/src", "code/tests", "code/examples", "code/scripts"]
 extend-exclude = ["data", "docs", ".venv"]
 
 [tool.ruff.lint]
@@ -91,7 +91,7 @@ line-ending = "lf"
 # 覆盖率：只看 src，测试与示例不计入
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
-source = ["src/logistics_agent"]
+source = ["code/src/logistics_agent"]
 omit = ["*/static/*", "*/templates/*"]
 branch = true
 

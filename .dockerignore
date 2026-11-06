@@ -30,9 +30,9 @@ data/backups
 *.db-wal
 
 # 测试与文档：运行不需要
-tests
+code/tests
 docs
-examples
+code/examples
 requirements-dev.txt
 .pre-commit-config.yaml
 Makefile

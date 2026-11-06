@@ -45,8 +45,8 @@
 | 启动自检 | 配置类型/范围校验；生产模式强制密钥与 Secure Cookie，不合规拒绝启动 | `utils/config.py` |
 | 健康探针 | `/healthz` 存活、`/readyz` 就绪（数据库/索引/模型三项），失败带明细 | 内置路由 |
 | 运行指标 | Prometheus 文本格式：请求量、耗时、SSE 活跃数、确认积压、库大小 | `/metrics` |
-| 备份恢复 | 在线一致性快照、完整性校验、单文件可独立使用、恢复前自动另存 | `scripts/backup_db.py` |
-| 凭证轮换 | 列出仍在用演示口令的账号；交互改密 / 随机生成 / 自动化输入；写库后回读校验 | `scripts/set_password.py` |
+| 备份恢复 | 在线一致性快照、完整性校验、单文件可独立使用、恢复前自动另存 | `code/scripts/backup_db.py` |
+| 凭证轮换 | 列出仍在用演示口令的账号；交互改密 / 随机生成 / 自动化输入；写库后回读校验 | `code/scripts/set_password.py` |
 | 首次引导 | 开发环境播种演示账号，生产不播种；空库用 `ADMIN_INITIAL_PASSWORD` 建首个管理员，避免「起了但没人能登录」 | `auth.ensure_initial_accounts()` |
 | 容器交付 | 多阶段镜像、非 root 运行、内置健康检查、compose 编排 | `Dockerfile` |
 
@@ -77,7 +77,7 @@ pip install -e .
 cp .env.example .env
 
 # 5. 上线预检：环境、依赖、目录权限、数据库、密钥强度逐项过一遍
-PYTHONPATH=src python scripts/preflight.py
+PYTHONPATH=code/src python code/scripts/preflight.py
 
 # 6. 启动
 logistics-agent
@@ -94,16 +94,16 @@ logistics-agent
 > 首次启动改用 `ADMIN_INITIAL_PASSWORD` 建第一个管理员（见
 > [运维手册 6.1](docs/operations.md)）。若这个实例已经轮换过口令，
 > 初始值在 `data/runtime/credentials.local.txt`（忽略项，不入库）；
-> 随时可用 `python scripts/set_password.py --list` 查状态，
+> 随时可用 `python code/scripts/set_password.py --list` 查状态，
 > `--user admin --generate` 重置一条。
 
 ### 离线（装不上依赖）时的启动方式
 
-有些环境没有网络也没有 setuptools，`pip install -e .` 会卡在隔离构建阶段。这时直接把 `src` 加进模块路径即可：
+有些环境没有网络也没有 setuptools，`pip install -e .` 会卡在隔离构建阶段。这时直接把 `code/src` 加进模块路径即可：
 
 ```bash
-PYTHONPATH=src python -m logistics_agent.main
-# Windows CMD: set PYTHONPATH=src && python -m logistics_agent.main
+PYTHONPATH=code/src python -m logistics_agent.main
+# Windows CMD: set PYTHONPATH=code/src && python -m logistics_agent.main
 ```
 
 仓库自带的脚本与测试都做了同样的回退处理，不安装也能跑。
@@ -127,14 +127,14 @@ APP_ENV=production docker compose up -d
 
 ## 轻量 MVP（独立演示）
 
-如果只需要离线演示“选账单 → 核对 → 制度问答 → 草稿 → 人工确认”，可以启动 `mvp/` 中的轻量版。它不调用模型、不需要向量库或数据库，金额仍复用同一个 `domain.py`：
+如果只需要离线演示“选账单 → 核对 → 制度问答 → 草稿 → 人工确认”，可以启动 `code/mvp/` 中的轻量版。它不调用模型、不需要向量库或数据库，金额仍复用同一个 `domain.py`：
 
 ```bash
-python mvp/check_mvp.py          # 16 项 MVP 业务与接口验收
-python mvp/app.py --port 8010    # 仅监听本机
+python code/mvp/check_mvp.py          # 16 项 MVP 业务与接口验收
+python code/mvp/app.py --port 8010    # 仅监听本机
 ```
 
-打开 <http://127.0.0.1:8010>。启动步骤、三分钟演示脚本、接口和正式版边界见 [MVP 说明](mvp/README.md)。
+打开 <http://127.0.0.1:8010>。启动步骤、三分钟演示脚本、接口和正式版边界见 [MVP 说明](code/mvp/README.md)。
 
 ## 三分钟演示脚本
 
@@ -238,38 +238,38 @@ python mvp/app.py --port 8010    # 仅监听本机
 
 ```bash
 # 256 条离线单元测试（约 6 秒）
-python -m unittest discover -s tests -v
+python -m unittest discover -s code/tests -v
 
 # 上线预检：配置、依赖、数据库、密钥、磁盘、备份新鲜度
-PYTHONPATH=src python scripts/preflight.py
+PYTHONPATH=code/src python code/scripts/preflight.py
 
 # 仓库规范：编码、换行、行尾空白、密钥扫描、必备文件
-python scripts/check_repo.py
+python code/scripts/check_repo.py
 
 # 文档一致性：链接、路径、接口、命令是否真实存在
-python scripts/check_docs.py
+python code/scripts/check_docs.py
 
 # 30 条评测用例的数据与工具名校验
-python scripts/check_cases.py
+python code/scripts/check_cases.py
 
 # 不经过模型，直接验证服务端权限闸门（8 个场景 16 项断言）
-python scripts/check_gates.py
+python code/scripts/check_gates.py
 
 # 需要服务已启动：验证确认接口读写同一份状态（11 项断言，不调用模型）
-PYTHONPATH=src python scripts/check_confirm_api.py
+PYTHONPATH=code/src python code/scripts/check_confirm_api.py
 
 # 在线备份：服务运行中也能取一致性快照，备份后自动校验
-PYTHONPATH=src python scripts/backup_db.py
+PYTHONPATH=code/src python code/scripts/backup_db.py
 
 # 初始凭证轮换：先看谁还在用演示口令，再逐个改密
-PYTHONPATH=src python scripts/set_password.py --list
-PYTHONPATH=src python scripts/set_password.py --user admin
+PYTHONPATH=code/src python code/scripts/set_password.py --list
+PYTHONPATH=code/src python code/scripts/set_password.py --user admin
 
 # 离线业务示例：运费推导 + 三张账单结论
-python examples/demo.py
+python code/examples/demo.py
 
 # 需要真实模型：回放三条 Agent 轨迹
-python examples/demo_agent.py
+python code/examples/demo_agent.py
 ```
 
 装了 make 可以一条命令全跑：
@@ -281,7 +281,7 @@ make check
 没有 make 的 Windows 环境，等价写法：
 
 ```bash
-python scripts/check_repo.py && python scripts/check_docs.py && python scripts/check_cases.py && python -m unittest discover -s tests
+python code/scripts/check_repo.py && python code/scripts/check_docs.py && python code/scripts/check_cases.py && python -m unittest discover -s code/tests
 ```
 
 测试覆盖的重点不是行数，而是**那些一旦破了就会动到钱的路径**：
@@ -297,35 +297,38 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 ## 目录结构
 
 ```text
-├── src/logistics_agent/
-│   ├── main.py                  # 命令行入口
-│   ├── app.py                   # FastAPI 路由、SSE 编排、错误码
-│   ├── agent.py                 # 执行循环：决策 → 工具 → 回填 → 再决策
-│   ├── tools.py                 # 工具 Schema、前置闸门、执行分发
-│   ├── skills.py                # 能力包定义、路由、系统提示词
-│   ├── rag_service.py           # 混合检索与索引管理
-│   ├── reimburse_agent_mvp.py   # 检索内核（切片、向量、BM25）
-│   ├── llm.py                   # 模型客户端与流式解析
-│   ├── db.py                    # SQLite 数据层
-│   ├── auth.py                  # JWT + HttpOnly Cookie 鉴权
-│   ├── metrics.py               # Prometheus 文本格式指标（零依赖）
-│   ├── ratelimit.py             # 限流、配额、并发闸门
-│   ├── core/domain.py           # 业务事实与确定性计算
-│   ├── utils/paths.py           # 统一路径
-│   ├── utils/config.py          # 配置读取与启动校验（范围、枚举、生产守卫）
-│   ├── utils/text.py            # 文本规范化与截断
-│   ├── utils/masking.py         # 日志脱敏
-│   ├── static/                  # 员工端页面与样式
-│   └── templates/               # 管理端 Jinja2 模板
-├── data/knowledge/              # 唯一参与 RAG 索引的制度语料
-├── data/runtime/                # 本地 SQLite（已忽略，不上传）
-├── docs/                        # 设计、API、运维手册、上线清单、实测轨迹
-├── tests/                       # 256 条离线测试 + 评测数据
-├── examples/                    # 离线示例与轨迹回放
-├── scripts/                     # 自检、预检、备份、改密、构建、部署
-├── config/default.yaml          # 非机密默认配置
-├── Makefile                     # 常用任务入口
-└── .github/                     # CI 与协作模板
+├── code/
+│   ├── src/logistics_agent/         # 主项目：FastAPI + Agent + 领域层
+│   │   ├── main.py                  # 命令行入口
+│   │   ├── app.py                   # FastAPI 路由、SSE 编排、错误码
+│   │   ├── agent.py                 # 执行循环：决策 → 工具 → 回填 → 再决策
+│   │   ├── tools.py                 # 工具 Schema、前置闸门、执行分发
+│   │   ├── skills.py                # 能力包定义、路由、系统提示词
+│   │   ├── rag_service.py           # 混合检索与索引管理
+│   │   ├── reimburse_agent_mvp.py   # 检索内核（切片、向量、BM25）
+│   │   ├── llm.py                   # 模型客户端与流式解析
+│   │   ├── db.py                    # SQLite 数据层
+│   │   ├── auth.py                  # JWT + HttpOnly Cookie 鉴权
+│   │   ├── metrics.py               # Prometheus 文本格式指标（零依赖）
+│   │   ├── ratelimit.py             # 限流、配额、并发闸门
+│   │   ├── core/domain.py           # 业务事实与确定性计算
+│   │   ├── utils/
+│   │   │   ├── paths.py             # 统一路径
+│   │   │   ├── config.py            # 配置读取与启动校验
+│   │   │   ├── text.py              # 文本规范化与截断
+│   │   │   └── masking.py           # 日志脱敏
+│   │   ├── static/                  # 员工端页面与样式
+│   │   └── templates/               # 管理端 Jinja2 模板
+│   ├── mvp/                         # 轻量独立演示（无模型 / 无向量库 / 无数据库）
+│   ├── tests/                       # 256 条离线测试 + 评测数据
+│   ├── examples/                    # 离线示例与轨迹回放
+│   └── scripts/                     # 自检、预检、备份、改密、构建、部署
+├── config/default.yaml              # 非机密默认配置
+├── data/knowledge/                  # 唯一参与 RAG 索引的制度语料
+├── data/runtime/                    # 本地 SQLite（已忽略，不上传）
+├── docs/                            # 设计、API、运维手册、上线清单、实测轨迹
+├── Makefile                         # 常用任务入口
+└── .github/                         # CI 与协作模板
 ```
 
 ## 配置项
@@ -351,7 +354,7 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 上一个实例还在跑。Windows 用 `netstat -ano | findstr :8000` 找到 PID 后 `taskkill /PID <pid> /F`；macOS/Linux 用 `lsof -i :8000` 后 `kill`。
 
 **报 `ModuleNotFoundError: logistics_agent`**
-没装成包也没设路径。执行 `export PYTHONPATH=src` 后重试，或用 `PYTHONPATH=src python -m logistics_agent.main`。
+没装成包也没设路径。执行 `export PYTHONPATH=code/src` 后重试，或用 `PYTHONPATH=code/src python -m logistics_agent.main`。
 
 **页面能开，但回答像模板**
 没读到模型密钥，降级成了 mock。检查 `.env` 是否在项目根目录、`LLM_API_KEY` 是否非空，然后重启。
@@ -365,7 +368,7 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 ## 工程约定
 
 - **提交前**：`pre-commit install` 后可自动跑 ruff、仓库自检、文档校验与单元测试。
-- **新增接口**：同步更新 [API 说明](docs/api.md)，否则 `scripts/check_docs.py` 会在 CI 里报错。
+- **新增接口**：同步更新 [API 说明](docs/api.md)，否则 `code/scripts/check_docs.py` 会在 CI 里报错。
 - **改动业务规则**：先改 `core/domain.py` 并补测试，再动提示词——规则写在代码里，不写在提示里。
 - **新增环境变量**：同时更新 `.env.example`，否则仓库自检会警告。
 
@@ -379,7 +382,7 @@ python scripts/check_repo.py && python scripts/check_docs.py && python scripts/c
 - 人工确认状态已存进 SQLite，多 worker 可以正确处理；但**限流计数仍在进程内存**，多实例会把每用户额度放大成「每实例额度」，横向扩展前要先把计数器换到 Redis；
 - SQLite 适合 3~5 人的并发写入，人多了要换 PostgreSQL；
 - 备份、探针、指标、日志保留都已内置，日常运维不需要额外组件；生产环境开启指标必须配 `METRICS_TOKEN`（同机反代下「仅本机」判断会失效），否则拒绝启动；
-- 演示口令随代码发版，部署前必须更换：`scripts/set_password.py --list` 会标出还在用演示口令的账号，改完回读校验；改密不会让已签发的令牌立刻失效（最长 8 小时），要立即踢下线需轮换 `JWT_SECRET`。
+- 演示口令随代码发版，部署前必须更换：`code/scripts/set_password.py --list` 会标出还在用演示口令的账号，改完回读校验；改密不会让已签发的令牌立刻失效（最长 8 小时），要立即踢下线需轮换 `JWT_SECRET`。
 
 部署拓扑、上线顺序、告警建议、备份恢复与故障处置，见[运维手册](docs/operations.md)。正式上线前请逐项完成[上线前检查清单](docs/prelaunch_checklist.md)。
 
